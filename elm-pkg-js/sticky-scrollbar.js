@@ -1,11 +1,16 @@
-// Defines <difft-scrollbar>, the always-visible horizontal scrollbar
-// rendered beneath each file's diff (see `viewFileDiff` in
-// src/Frontend.elm). The real scroll container (.diff-chunks) spans the
-// whole file, so its native scrollbar sits at the bottom of the diff
-// block — off-screen for any tall file. This element sticks to the
-// viewport bottom instead (CSS in Frontend.elm), mirrors the container's
-// scroll width with a 1px spacer, and keeps the two scrollLefts in sync
-// both ways.
+// Defines <difft-scrollbar>, the single horizontal scrollbar rendered
+// beneath each file's diff (see `viewFileDiff` in src/Frontend.elm).
+//
+// The diff columns are fixed 50/50 viewports that never scroll as boxes:
+// each line slides inside its stationary `.line-clip` window by the
+// `--hscroll` custom property (CSS in Frontend.elm). This element is the
+// thing that sets that property: it recreates the scroll range with a
+// spacer child sized to (own width + the longest line's overhang past
+// its clip window), sticks to the viewport bottom while the file is in
+// view, and feeds its scrollLeft into `--hscroll` on the `.diff-chunks`
+// sibling — one scrollbar, both columns shifting by the same amount.
+// Trackpad/shift-wheel horizontal gestures over the diff are also routed
+// here, since the diff itself has no scroll container anymore.
 //
 // Elm renders the element empty and only ever touches its `wrap`
 // attribute, so the spacer child and classes added here are safe from
@@ -22,9 +27,9 @@ exports.init = async function init() {
   customElements.define(
     'difft-scrollbar',
     class extends HTMLElement {
-      // Elm flips `wrap` with the line-wrap toggle. Wrapped lines change
-      // the container's scroll width without any DOM mutation or box
-      // resize, so this is the only signal that a re-measure is needed.
+      // Elm flips `wrap` with the line-wrap toggle. Wrapping changes
+      // every line's overhang without any DOM mutation or box resize, so
+      // this is the only signal that a re-measure is needed.
       static get observedAttributes() {
         return ['wrap'];
       }
@@ -56,35 +61,46 @@ exports.init = async function init() {
             if (!this._target) {
               return;
             }
-            this._spacer.style.width = this._target.scrollWidth + 'px';
-            this.classList.toggle(
-              'has-overflow',
-              this._target.scrollWidth > this._target.clientWidth + 1
-            );
+            let range = 0;
+            for (const clip of this._target.querySelectorAll('.line-clip')) {
+              const overhang = clip.scrollWidth - clip.clientWidth;
+              if (overhang > range) {
+                range = overhang;
+              }
+            }
+            this._range = range;
+            // Order matters: unhiding first, so clientWidth is real when
+            // the spacer is sized (a display:none box measures 0).
+            this.classList.toggle('has-overflow', range > 1);
+            this._spacer.style.width = this.clientWidth + range + 'px';
+            // The browser clamps scrollLeft when the range shrinks; push
+            // the (possibly clamped) value back out so lines never stay
+            // shifted past their new end.
+            this._applyScroll();
           });
         };
 
-        // Two-way sync, loop-free without flags: assignment only happens
-        // when the values differ, so the echo event finds them equal and
-        // stops.
-        this._onTargetScroll = () => {
-          if (Math.abs(this.scrollLeft - target.scrollLeft) >= 1) {
-            this.scrollLeft = target.scrollLeft;
+        this._applyScroll = () => {
+          this._target.style.setProperty('--hscroll', this.scrollLeft + 'px');
+        };
+        this.addEventListener('scroll', this._applyScroll, { passive: true });
+
+        // The diff has no scroll container of its own anymore, so
+        // horizontal trackpad/shift-wheel gestures over it land here.
+        // Vertical scrolling stays the page's.
+        this._onWheel = (e) => {
+          if (this._range > 0 && Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+            this.scrollLeft += e.deltaX;
+            e.preventDefault();
           }
         };
-        this._onSelfScroll = () => {
-          if (Math.abs(target.scrollLeft - this.scrollLeft) >= 1) {
-            target.scrollLeft = this.scrollLeft;
-          }
-        };
-        target.addEventListener('scroll', this._onTargetScroll, { passive: true });
-        this.addEventListener('scroll', this._onSelfScroll, { passive: true });
+        target.addEventListener('wheel', this._onWheel, { passive: false });
 
         // Container box changes (window/sidebar resize) …
         this._resizeObserver = new ResizeObserver(this._refresh);
         this._resizeObserver.observe(target);
         // … and content changes (expanding context lines) both move the
-        // scroll width.
+        // longest line's overhang.
         this._mutationObserver = new MutationObserver(this._refresh);
         this._mutationObserver.observe(target, { childList: true, subtree: true });
 
@@ -107,8 +123,8 @@ exports.init = async function init() {
           this._mutationObserver = null;
         }
         if (this._target) {
-          this._target.removeEventListener('scroll', this._onTargetScroll);
-          this.removeEventListener('scroll', this._onSelfScroll);
+          this._target.removeEventListener('wheel', this._onWheel);
+          this.removeEventListener('scroll', this._applyScroll);
           this._target = null;
         }
       }

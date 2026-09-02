@@ -1260,7 +1260,7 @@ viewWholeFile side syntaxSpans content =
                             [ div [ Attr.class ("hunk-side " ++ sideClass) ]
                                 [ span [ Attr.class "line-number" ]
                                     [ text (String.fromInt (i + 1)) ]
-                                , span [ Attr.class "line-content" ]
+                                , clippedLine
                                     (viewHighlightedLine side
                                         (Dict.get i syntaxByLine |> Maybe.withDefault [])
                                         []
@@ -1387,7 +1387,7 @@ viewContextLine lhsContext lhsLineNum rhsContext rhsLineNum =
     div [ Attr.class "hunk context-line" ]
         [ div [ Attr.class "hunk-side" ]
             [ span [ Attr.class "line-number" ] [ text (String.fromInt (lhsLineNum + 1)) ]
-            , span [ Attr.class "line-content" ]
+            , clippedLine
                 (viewHighlightedLine SideRemoved
                     (syntaxForLine lhsLineNum lhsContext)
                     []
@@ -1396,7 +1396,7 @@ viewContextLine lhsContext lhsLineNum rhsContext rhsLineNum =
             ]
         , div [ Attr.class "hunk-side" ]
             [ span [ Attr.class "line-number" ] [ text (String.fromInt (rhsLineNum + 1)) ]
-            , span [ Attr.class "line-content" ]
+            , clippedLine
                 (viewHighlightedLine SideAdded
                     (syntaxForLine rhsLineNum rhsContext)
                     []
@@ -1433,7 +1433,7 @@ viewHunkSide changeSide context maybeSide =
         Just side ->
             [ span [ Attr.class "line-number" ]
                 [ text (String.fromInt (side.lineNumber + 1)) ]
-            , span [ Attr.class "line-content" ]
+            , clippedLine
                 (viewHighlightedLine changeSide
                     (syntaxForLine side.lineNumber context)
                     side.changes
@@ -1443,8 +1443,23 @@ viewHunkSide changeSide context maybeSide =
 
         Nothing ->
             [ span [ Attr.class "line-number" ] []
-            , span [ Attr.class "line-content" ] []
+            , clippedLine []
             ]
+
+
+{-| One line's text, wrapped in the fixed-width viewport that horizontal
+scrolling shifts it inside of. `.line-clip` is the stationary clipping
+window (it fills the column next to the line number); `.line-content`
+sizes to the full untruncated line and slides left inside it by the
+`--hscroll` custom property, which the difft-scrollbar element sets on
+`.diff-chunks` (see elm-pkg-js/sticky-scrollbar.js). Both columns read
+the same variable, so they shift by the same amount — one scrollbar,
+two synchronized viewports.
+-}
+clippedLine : List (Html msg) -> Html msg
+clippedLine content =
+    span [ Attr.class "line-clip" ]
+        [ span [ Attr.class "line-content" ] content ]
 
 
 lineAt : Int -> Array String -> String
@@ -1680,23 +1695,29 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .diff-status-removed { background: #f8514940; color: #f85149; }
 .diff-status-renamed { background: #a37ade40; color: #a37ade; }
 .diff-status-copied { background: #a37ade40; color: #a37ade; }
-/* The two diff columns are one shared grid: every row (hunk, context
-   line) subgrids into the same two max-content tracks, so each column is
-   as wide as its longest line, the column boundary stays aligned across
-   all rows, and the block gets ONE horizontal scrollbar that moves both
-   columns together — no line is ever cut off behind the other column.
-   The half-of-visible-width floor comes from min-width: 50cqw on the
-   cells (not minmax(50%, max-content) tracks: a minmax track only grows
-   into free space, of which a scroll container has none, so it would
-   stay clamped at the minimum). */
-.diff-chunks { overflow-x: auto; display: grid; grid-template-columns: max-content max-content; container-type: inline-size; scrollbar-width: none; }
-.diff-chunks::-webkit-scrollbar { display: none; }
-/* The container's own scrollbar (hidden above) would sit at the very
-   bottom of the file's diff — off-screen for tall files. The
-   difft-scrollbar custom element (elm-pkg-js/sticky-scrollbar.js)
-   replaces it: pinned to the viewport bottom while the file is in view,
-   mirroring the container's scroll width via its spacer child and
-   syncing scrollLeft both ways. It shows itself (has-overflow) only when
+/* The two diff columns are pinned to equal halves and never scroll as
+   boxes. Each line's text sits in a stationary clipping window
+   (.line-clip) and slides inside it by the --hscroll custom property, so
+   both columns shift by the same amount in place — like two synchronized
+   viewports — instead of the left column panning off-screen to reveal
+   the right. --hscroll is set on .diff-chunks by the difft-scrollbar
+   element below; translate (not text-indent) keeps per-frame scrolling
+   off the layout path. */
+.diff-chunks { display: grid; grid-template-columns: 1fr 1fr; }
+.chunk-group, .context-lines { grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; }
+.hunk { grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; line-height: 20px; }
+.hunk-side { display: flex; padding: 0 8px; min-width: 0; }
+.hunk-single .hunk-side { grid-column: 1 / -1; }
+.line-clip { flex: 1; min-width: 0; overflow: hidden; }
+.line-content { display: block; width: max-content; min-width: 100%; white-space: pre; tab-size: 4; transform: translateX(calc(-1 * var(--hscroll, 0px))); }
+/* Line wrapping (toggled): long lines wrap in place inside their fixed
+   half; no horizontal scrolling, so the slide is disabled. */
+.wrap-lines .line-content { width: auto; transform: none; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* The scrollbar driving --hscroll: a difft-scrollbar custom element
+   (elm-pkg-js/sticky-scrollbar.js) pinned to the viewport bottom while
+   its file is in view. Its spacer child recreates the scroll range (the
+   overhang of the file's longest line past its clipping window), and its
+   scrollLeft feeds --hscroll. It shows itself (has-overflow) only when
    there is something to scroll; wrap mode hides it outright — that rule
    must stay after has-overflow, since the element's measurements go
    stale while wrapped. The scrollbar pseudo-element styling doubles as
@@ -1708,23 +1729,12 @@ difft-scrollbar.has-overflow { display: block; }
 difft-scrollbar::-webkit-scrollbar { height: 12px; }
 difft-scrollbar::-webkit-scrollbar-track { background: #161b22; }
 difft-scrollbar::-webkit-scrollbar-thumb { background: #484f58; border-radius: 6px; border: 2px solid #161b22; }
-.chunk-group, .context-lines { grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; }
-.hunk { grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; line-height: 20px; }
-.hunk-side { display: flex; padding: 0 8px; min-width: 50cqw; }
-.hunk-single .hunk-side { grid-column: 1 / -1; min-width: 100cqw; }
-/* Line wrapping (toggled): columns pin to equal halves and long lines
-   wrap in place instead of growing the scrollable width. */
-.wrap-lines .diff-chunks { grid-template-columns: 1fr 1fr; }
-.wrap-lines .hunk-side { min-width: 0; }
-.wrap-lines .hunk-single .hunk-side { min-width: 0; }
-.wrap-lines .line-content { white-space: pre-wrap; overflow-wrap: anywhere; }
 .hunk-lhs { background: #1c1210; border-right: 1px solid #30363d; }
 .hunk-rhs { background: #0f1a10; }
 .hunk-single .hunk-lhs { border-right: none; }
 .context-line .hunk-side { background: #0d1117; }
 .context-line .hunk-side:first-child { border-right: 1px solid #30363d; }
 .line-number { color: #484f58; min-width: 48px; text-align: right; padding-right: 12px; user-select: none; flex-shrink: 0; }
-.line-content { white-space: pre; tab-size: 4; flex: 1; min-width: 0; }
 .diff-change { border-radius: 2px; }
 .diff-change-removed { background: #8b1a1f99; }
 .diff-change-added { background: #1c6b2eb3; }
