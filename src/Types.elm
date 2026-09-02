@@ -169,6 +169,7 @@ type alias DifftResult =
 
 type alias FrontendModel =
     { key : Effect.Browser.Navigation.Key
+    , url : Url
     , page : Page
     , githubUser : Maybe GithubUser
     , repos : List GithubRepo
@@ -231,11 +232,12 @@ type FrontendMsg
     | GotDiffsFromWasm (Result String (List FileDiff))
     | CancelAuthentication
     | AuthAttemptTimedOut
-    | SendAuthenticateWithCode String
+    | DeferredSendToBackend ToBackend
 
 
 type ToBackend
     = AuthenticateWithCode String
+    | CheckSession
     | FetchRepos
     | FetchPullRequests String String
     | FetchPRDiff String String Int
@@ -291,6 +293,7 @@ type alias GithubPRFileEntry =
 type ToFrontend
     = AuthSuccess GithubUser
     | AuthFailure String
+    | NoSession
     | ReposLoaded (List GithubRepo)
     | PullRequestsLoaded (List GithubPullRequest)
     | PRFilesLoaded (List PRFile)

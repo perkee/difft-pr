@@ -351,6 +351,20 @@ resolvedPRFiles files =
             )
 
 
+{-| What a freshly loaded page should learn about its session: the user
+it already belongs to, or an explicit `NoSession` — never silence, so
+the frontend doesn't have to guess whether an answer is still coming.
+-}
+sessionResponse : Dict.Dict String GithubUser -> String -> ToFrontend
+sessionResponse users sessionIdStr =
+    case Dict.get sessionIdStr users of
+        Just user ->
+            AuthSuccess user
+
+        Nothing ->
+            NoSession
+
+
 updateFromFrontend : SessionId -> ClientId -> ToBackend -> Model -> ( Model, Command BackendOnly ToFrontend BackendMsg )
 updateFromFrontend sessionId clientId toBackend model =
     let
@@ -364,6 +378,11 @@ updateFromFrontend sessionId clientId toBackend model =
         AuthenticateWithCode code ->
             ( model
             , exchangeCodeForToken sessionIdStr clientIdStr code
+            )
+
+        CheckSession ->
+            ( model
+            , Effect.Lamdera.sendToFrontend clientId (sessionResponse model.users sessionIdStr)
             )
 
         FetchRepos ->

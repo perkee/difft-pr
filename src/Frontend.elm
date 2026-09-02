@@ -66,9 +66,10 @@ app_ =
     }
 
 
-emptyModel : Nav.Key -> Model
-emptyModel key =
+emptyModel : Nav.Key -> Url.Url -> Model
+emptyModel key url =
     { key = key
+    , url = url
     , page = LoginPage
     , githubUser = Nothing
     , repos = []
@@ -115,6 +116,7 @@ init url key =
     case extractCode url of
         Just code ->
             ( { key = key
+              , url = url
               , page = LoadingPage
               , githubUser = Nothing
               , repos = []
@@ -128,13 +130,19 @@ init url key =
             , Command.batch
                 [ Nav.replaceUrl key "/"
                 , authTimeoutCommand
-                , sendAuthenticateWithCodeCommand code
+                , sendToBackendAfterConnect (AuthenticateWithCode code)
                 ]
             )
 
         Nothing ->
-            ( emptyModel key
-            , Command.none
+            -- The backend may still hold a session for this browser (the
+            -- sid cookie outlives the page) — ask it before making the
+            -- user log in again. Until it answers, show the ordinary
+            -- login page: a logged-out user sees exactly what they
+            -- should, and a logged-in one jumps to their page (back at
+            -- this same URL, see AuthSuccess) moments later.
+            ( emptyModel key url
+            , sendToBackendAfterConnect CheckSession
             )
 
 
@@ -158,17 +166,18 @@ authTimeoutCommand =
 
 {-| `init` runs (and its commands fire) right when the page loads — before
 the Lamdera live-connection WebSocket has necessarily finished opening.
-Sending `AuthenticateWithCode` synchronously as part of `init` risks the
-message going out on a socket that isn't open yet and being silently
-lost, which is indistinguishable from the backend just never responding
-(it's the same failure this code exists to route around: see
-`authTimeoutCommand`'s doc comment). A short delay before the actual
-send gives the connection time to establish first.
+A `sendToBackend` fired synchronously from `init` risks going out on a
+socket that isn't open yet and being silently lost, which is
+indistinguishable from the backend just never responding (it's the same
+failure `authTimeoutCommand` exists to route around). A short delay
+before the actual send gives the connection time to establish first.
+Only needed for sends that originate in `init` — anything triggered by
+user interaction happens long after the socket is up.
 -}
-sendAuthenticateWithCodeCommand : String -> Command FrontendOnly ToBackend FrontendMsg
-sendAuthenticateWithCodeCommand code =
+sendToBackendAfterConnect : ToBackend -> Command FrontendOnly ToBackend FrontendMsg
+sendToBackendAfterConnect message =
     Effect.Task.perform
-        (\() -> SendAuthenticateWithCode code)
+        (\() -> DeferredSendToBackend message)
         (Effect.Process.sleep (Duration.milliseconds 500))
 
 
@@ -184,72 +193,16 @@ update msg model =
                     ( model, Nav.load href )
 
         UrlChanged url ->
+            let
+                modelWithUrl =
+                    { model | url = url }
+            in
             case model.githubUser of
                 Nothing ->
-                    ( model, Command.none )
+                    ( modelWithUrl, Command.none )
 
                 Just _ ->
-                    case parseRoute url of
-                        HomeRoute ->
-                            ( { model
-                                | page = RepoListPage
-                                , selectedRepo = Nothing
-                                , pullRequests = []
-                                , selectedPR = Nothing
-                                , diffs = DiffsNotStarted
-                                , expandedContexts = Set.empty
-                                , error = Nothing
-                              }
-                            , if List.isEmpty model.repos then
-                                Effect.Lamdera.sendToBackend FetchRepos
-
-                              else
-                                Command.none
-                            )
-
-                        RepoRoute owner repo ->
-                            let
-                                selectedRepo =
-                                    List.filter (\r -> r.owner == owner && r.name == repo) model.repos
-                                        |> List.head
-                                        |> Maybe.withDefault { owner = owner, name = repo, fullName = owner ++ "/" ++ repo }
-                            in
-                            ( { model
-                                | page = PRListPage
-                                , selectedRepo = Just selectedRepo
-                                , pullRequests = []
-                                , selectedPR = Nothing
-                                , diffs = DiffsNotStarted
-                                , expandedContexts = Set.empty
-                                , error = Nothing
-                              }
-                            , Effect.Lamdera.sendToBackend (FetchPullRequests owner repo)
-                            )
-
-                        PRRoute owner repo prNumber ->
-                            let
-                                selectedRepo =
-                                    List.filter (\r -> r.owner == owner && r.name == repo) model.repos
-                                        |> List.head
-                                        |> Maybe.withDefault { owner = owner, name = repo, fullName = owner ++ "/" ++ repo }
-
-                                selectedPR =
-                                    List.filter (\pr -> pr.number == prNumber) model.pullRequests
-                                        |> List.head
-                            in
-                            ( { model
-                                | page = PRDetailPage
-                                , selectedRepo = Just selectedRepo
-                                , selectedPR = selectedPR
-                                , diffs = FetchingPRFiles
-                                , expandedContexts = Set.empty
-                                , error = Nothing
-                              }
-                            , Effect.Lamdera.sendToBackend (FetchPRDiff owner repo prNumber)
-                            )
-
-                        NotFoundRoute ->
-                            ( model, Command.none )
+                    showRoute modelWithUrl
 
         LoginClicked ->
             ( model
@@ -289,7 +242,7 @@ update msg model =
                     )
 
         LogoutClicked ->
-            ( emptyModel model.key
+            ( emptyModel model.key model.url
             , Command.batch
                 [ Effect.Lamdera.sendToBackend LogoutSession
                 , Nav.pushUrl model.key "/"
@@ -328,26 +281,113 @@ update msg model =
                 _ ->
                     ( model, Command.none )
 
-        SendAuthenticateWithCode code ->
-            ( model, Effect.Lamdera.sendToBackend (AuthenticateWithCode code) )
+        DeferredSendToBackend message ->
+            ( model, Effect.Lamdera.sendToBackend message )
+
+
+{-| Materialize the page for the model's current URL. Assumes the user
+is authenticated — callers guard on that. Used both when the URL changes
+mid-session and when authentication (fresh or restored) completes, so a
+restored session lands back on the page the URL names, not a hardcoded
+one.
+-}
+showRoute : Model -> ( Model, Command FrontendOnly ToBackend FrontendMsg )
+showRoute model =
+    case parseRoute model.url of
+        HomeRoute ->
+            ( { model
+                | page = RepoListPage
+                , selectedRepo = Nothing
+                , pullRequests = []
+                , selectedPR = Nothing
+                , diffs = DiffsNotStarted
+                , expandedContexts = Set.empty
+                , error = Nothing
+              }
+            , if List.isEmpty model.repos then
+                Effect.Lamdera.sendToBackend FetchRepos
+
+              else
+                Command.none
+            )
+
+        RepoRoute owner repo ->
+            let
+                selectedRepo =
+                    List.filter (\r -> r.owner == owner && r.name == repo) model.repos
+                        |> List.head
+                        |> Maybe.withDefault { owner = owner, name = repo, fullName = owner ++ "/" ++ repo }
+            in
+            ( { model
+                | page = PRListPage
+                , selectedRepo = Just selectedRepo
+                , pullRequests = []
+                , selectedPR = Nothing
+                , diffs = DiffsNotStarted
+                , expandedContexts = Set.empty
+                , error = Nothing
+              }
+            , Effect.Lamdera.sendToBackend (FetchPullRequests owner repo)
+            )
+
+        PRRoute owner repo prNumber ->
+            let
+                selectedRepo =
+                    List.filter (\r -> r.owner == owner && r.name == repo) model.repos
+                        |> List.head
+                        |> Maybe.withDefault { owner = owner, name = repo, fullName = owner ++ "/" ++ repo }
+
+                selectedPR =
+                    List.filter (\pr -> pr.number == prNumber) model.pullRequests
+                        |> List.head
+            in
+            ( { model
+                | page = PRDetailPage
+                , selectedRepo = Just selectedRepo
+                , selectedPR = selectedPR
+                , diffs = FetchingPRFiles
+                , expandedContexts = Set.empty
+                , error = Nothing
+              }
+            , Effect.Lamdera.sendToBackend (FetchPRDiff owner repo prNumber)
+            )
+
+        NotFoundRoute ->
+            -- An unrecognized URL for an authenticated user falls back to
+            -- the repo list rather than leaving whatever page (possibly
+            -- the login page, after a session restore) was showing.
+            ( { model
+                | page = RepoListPage
+                , selectedRepo = Nothing
+                , pullRequests = []
+                , selectedPR = Nothing
+                , diffs = DiffsNotStarted
+                , expandedContexts = Set.empty
+                , error = Nothing
+              }
+            , if List.isEmpty model.repos then
+                Effect.Lamdera.sendToBackend FetchRepos
+
+              else
+                Command.none
+            )
 
 
 updateFromBackend : ToFrontend -> Model -> ( Model, Command FrontendOnly ToBackend FrontendMsg )
 updateFromBackend msg model =
     case msg of
         AuthSuccess user ->
-            ( { model
-                | githubUser = Just user
-                , page = RepoListPage
-                , error = Nothing
-              }
-            , Effect.Lamdera.sendToBackend FetchRepos
-            )
+            showRoute { model | githubUser = Just user, error = Nothing }
 
         AuthFailure error ->
             ( { model | page = LoginPage, error = Just error }
             , Command.none
             )
+
+        NoSession ->
+            -- The page already shows the login screen; this just confirms
+            -- there's nothing to restore.
+            ( model, Command.none )
 
         ReposLoaded repos ->
             ( { model | repos = repos }, Command.none )
@@ -364,7 +404,7 @@ updateFromBackend msg model =
             ( { model | diffs = DiffsFetchFailed error }, Command.none )
 
         LoggedOut ->
-            ( emptyModel model.key, Nav.replaceUrl model.key "/" )
+            ( emptyModel model.key model.url, Nav.replaceUrl model.key "/" )
 
 
 githubOAuthUrl : String -> String

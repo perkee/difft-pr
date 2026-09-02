@@ -347,6 +347,20 @@ suite =
                             , Query.hasNot [ Selector.class "hunk-single" ]
                             ]
             ]
+        , describe "session restore"
+            [ test "a known session restores its user" <|
+                \_ ->
+                    let
+                        user =
+                            { login = "octocat", avatarUrl = "https://example.com/a.png" }
+                    in
+                    Backend.sessionResponse (Dict.fromList [ ( "session-1", user ) ]) "session-1"
+                        |> Expect.equal (AuthSuccess user)
+            , test "an unknown session gets an explicit NoSession, not silence" <|
+                \_ ->
+                    Backend.sessionResponse Dict.empty "session-1"
+                        |> Expect.equal NoSession
+            ]
         , describe "lineSegments"
             [ test "no spans at all yields one plain segment" <|
                 \_ ->
