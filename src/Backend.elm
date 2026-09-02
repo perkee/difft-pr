@@ -10,6 +10,7 @@ import Json.Decode as Decode
 import Json.Encode as Encode
 import Lamdera
 import Types exposing (..)
+import Url
 
 
 type alias Model =
@@ -35,6 +36,7 @@ init : ( Model, Command BackendOnly ToFrontend BackendMsg )
 init =
     ( { sessions = Dict.empty
       , users = Dict.empty
+      , pendingPRDiffs = Dict.empty
       }
     , Command.none
     )
@@ -70,6 +72,38 @@ expectString : (Result String String -> msg) -> Effect.Http.Expect msg
 expectString toMsg =
     Effect.Http.expectString
         (\result -> toMsg (Result.mapError httpErrorToString result))
+
+
+{-| GitHub's content API 404s for a path that doesn't exist at that ref
+(e.g. the base side of a file that was added in this PR). That's a
+routine, expected outcome here, not a real error — every caller that
+fetches file content wants "" in that case, not a failure to report.
+-}
+expectRawContentOrEmpty : (Result String String -> msg) -> Effect.Http.Expect msg
+expectRawContentOrEmpty toMsg =
+    Effect.Http.expectStringResponse
+        (\result -> toMsg result)
+        (\response ->
+            case response of
+                Effect.Http.GoodStatus_ _ body ->
+                    Ok body
+
+                Effect.Http.BadStatus_ metadata _ ->
+                    if metadata.statusCode == 404 then
+                        Ok ""
+
+                    else
+                        Err ("Bad status: " ++ String.fromInt metadata.statusCode)
+
+                Effect.Http.BadUrl_ url ->
+                    Err ("Bad URL: " ++ url)
+
+                Effect.Http.Timeout_ ->
+                    Err "Request timed out"
+
+                Effect.Http.NetworkError_ ->
+                    Err "Network error"
+        )
 
 
 update : BackendMsg -> Model -> ( Model, Command BackendOnly ToFrontend BackendMsg )
@@ -142,24 +176,167 @@ update msg model =
                     , Effect.Lamdera.sendToFrontend clientId (AuthFailure error)
                     )
 
-        GotPRDiffResults clientIdStr result ->
+        GotPRMeta ctx result ->
             let
                 clientId =
-                    Effect.Lamdera.clientIdFromString clientIdStr
+                    Effect.Lamdera.clientIdFromString ctx.clientIdStr
             in
             case result of
-                Ok results ->
+                Ok meta ->
+                    ( model, fetchPRFileList ctx meta )
+
+                Err error ->
                     ( model
-                    , Effect.Lamdera.sendToFrontend clientId (DiffResultsLoaded results)
+                    , Effect.Lamdera.sendToFrontend clientId (PRDiffFetchFailed error)
+                    )
+
+        GotPRFileList ctx meta result ->
+            let
+                clientId =
+                    Effect.Lamdera.clientIdFromString ctx.clientIdStr
+            in
+            case result of
+                Ok entries ->
+                    let
+                        pending =
+                            { clientId = ctx.clientIdStr
+                            , owner = ctx.owner
+                            , repo = ctx.repo
+                            , files =
+                                entries
+                                    |> List.map (\entry -> ( entry.filename, initPendingFile entry.status ))
+                                    |> Dict.fromList
+                            }
+                    in
+                    ( { model | pendingPRDiffs = Dict.insert ctx.requestKey pending model.pendingPRDiffs }
+                    , entries
+                        |> List.concatMap (fetchFileContentCommands ctx meta)
+                        |> Command.batch
                     )
 
                 Err error ->
                     ( model
-                    , Effect.Lamdera.sendToFrontend clientId (AuthFailure error)
+                    , Effect.Lamdera.sendToFrontend clientId (PRDiffFetchFailed error)
                     )
+
+        GotFileContent requestKey filename side result ->
+            case Dict.get requestKey model.pendingPRDiffs of
+                Nothing ->
+                    -- Already finalized (or never existed) — nothing to update.
+                    ( model, Command.none )
+
+                Just pending ->
+                    case result of
+                        Err error ->
+                            let
+                                clientId =
+                                    Effect.Lamdera.clientIdFromString pending.clientId
+                            in
+                            ( { model | pendingPRDiffs = Dict.remove requestKey model.pendingPRDiffs }
+                            , Effect.Lamdera.sendToFrontend clientId (PRDiffFetchFailed error)
+                            )
+
+                        Ok content ->
+                            let
+                                updatedFiles =
+                                    Dict.update filename (Maybe.map (setContent side content)) pending.files
+
+                                updatedPending =
+                                    { pending | files = updatedFiles }
+                            in
+                            if allFilesResolved updatedFiles then
+                                let
+                                    clientId =
+                                        Effect.Lamdera.clientIdFromString pending.clientId
+                                in
+                                ( { model | pendingPRDiffs = Dict.remove requestKey model.pendingPRDiffs }
+                                , Effect.Lamdera.sendToFrontend clientId
+                                    (PRFilesLoaded (resolvedPRFiles updatedFiles))
+                                )
+
+                            else
+                                ( { model | pendingPRDiffs = Dict.insert requestKey updatedPending model.pendingPRDiffs }
+                                , Command.none
+                                )
 
         NoOpBackendMsg ->
             ( model, Command.none )
+
+
+initPendingFile : GithubFileStatus -> PendingFile
+initPendingFile status =
+    case status of
+        GithubFileAdded ->
+            { status = status, lhs = NotNeeded, rhs = ContentPending }
+
+        GithubFileRemoved ->
+            { status = status, lhs = ContentPending, rhs = NotNeeded }
+
+        GithubFileModified ->
+            { status = status, lhs = ContentPending, rhs = ContentPending }
+
+        GithubFileRenamed ->
+            { status = status, lhs = ContentPending, rhs = ContentPending }
+
+        GithubFileCopied ->
+            { status = status, lhs = ContentPending, rhs = ContentPending }
+
+
+setContent : FileSide -> String -> PendingFile -> PendingFile
+setContent side content file =
+    case side of
+        LhsSide ->
+            { file | lhs = ContentFetched content }
+
+        RhsSide ->
+            { file | rhs = ContentFetched content }
+
+
+allFilesResolved : Dict.Dict String PendingFile -> Bool
+allFilesResolved files =
+    files
+        |> Dict.values
+        |> List.all (\file -> isResolved file.lhs && isResolved file.rhs)
+
+
+isResolved : RemoteContent -> Bool
+isResolved content =
+    case content of
+        ContentPending ->
+            False
+
+        NotNeeded ->
+            True
+
+        ContentFetched _ ->
+            True
+
+
+resolvedContentToString : RemoteContent -> String
+resolvedContentToString content =
+    case content of
+        ContentFetched s ->
+            s
+
+        NotNeeded ->
+            ""
+
+        ContentPending ->
+            ""
+
+
+resolvedPRFiles : Dict.Dict String PendingFile -> List PRFile
+resolvedPRFiles files =
+    files
+        |> Dict.toList
+        |> List.map
+            (\( filename, file ) ->
+                { filename = filename
+                , status = file.status
+                , lhsContent = resolvedContentToString file.lhs
+                , rhsContent = resolvedContentToString file.rhs
+                }
+            )
 
 
 updateFromFrontend : SessionId -> ClientId -> ToBackend -> Model -> ( Model, Command BackendOnly ToFrontend BackendMsg )
@@ -200,7 +377,17 @@ updateFromFrontend sessionId clientId toBackend model =
         FetchPRDiff owner repo prNumber ->
             case Dict.get sessionIdStr model.sessions of
                 Just token ->
-                    ( model, fetchPRDiff clientIdStr token owner repo prNumber )
+                    let
+                        ctx =
+                            { clientIdStr = clientIdStr
+                            , owner = owner
+                            , repo = repo
+                            , prNumber = prNumber
+                            , token = token
+                            , requestKey = sessionIdStr ++ "|" ++ owner ++ "/" ++ repo ++ "#" ++ String.fromInt prNumber
+                            }
+                    in
+                    ( model, fetchPRMeta ctx )
 
                 Nothing ->
                     ( model
@@ -220,10 +407,20 @@ updateFromFrontend sessionId clientId toBackend model =
 -- GitHub API
 
 
+githubAuthHeaders : String -> String -> List Effect.Http.Header
+githubAuthHeaders token accept =
+    [ Effect.Http.header "Authorization" ("Bearer " ++ token)
+    , Effect.Http.header "Accept" accept
+    ]
+
+
 exchangeCodeForToken : String -> String -> String -> Command BackendOnly ToFrontend BackendMsg
 exchangeCodeForToken sessionIdStr clientIdStr code =
-    Effect.Http.post
-        { url = "https://github.com/login/oauth/access_token"
+    Effect.Http.request
+        { method = "POST"
+        , headers =
+            [ Effect.Http.header "Accept" "application/json" ]
+        , url = "https://github.com/login/oauth/access_token"
         , body =
             Effect.Http.jsonBody
                 (Encode.object
@@ -236,6 +433,8 @@ exchangeCodeForToken sessionIdStr clientIdStr code =
             expectJson
                 (GotAccessToken sessionIdStr clientIdStr)
                 (Decode.field "access_token" Decode.string)
+        , timeout = Nothing
+        , tracker = Nothing
         }
 
 
@@ -243,10 +442,7 @@ fetchGithubUser : String -> String -> String -> Command BackendOnly ToFrontend B
 fetchGithubUser sessionIdStr clientIdStr token =
     Effect.Http.request
         { method = "GET"
-        , headers =
-            [ Effect.Http.header "Authorization" ("Bearer " ++ token)
-            , Effect.Http.header "Accept" "application/json"
-            ]
+        , headers = githubAuthHeaders token "application/json"
         , url = "https://api.github.com/user"
         , body = Effect.Http.emptyBody
         , expect =
@@ -262,11 +458,8 @@ fetchRepos : String -> String -> Command BackendOnly ToFrontend BackendMsg
 fetchRepos clientIdStr token =
     Effect.Http.request
         { method = "GET"
-        , headers =
-            [ Effect.Http.header "Authorization" ("Bearer " ++ token)
-            , Effect.Http.header "Accept" "application/json"
-            ]
-        , url = "https://api.github.com/user/repos?sort=updated&per_page=30&type=owner"
+        , headers = githubAuthHeaders token "application/json"
+        , url = "https://api.github.com/user/repos?sort=updated&per_page=100&visibility=all&affiliation=owner,collaborator,organization_member"
         , body = Effect.Http.emptyBody
         , expect =
             expectJson
@@ -281,10 +474,7 @@ fetchPullRequests : String -> String -> String -> String -> Command BackendOnly 
 fetchPullRequests clientIdStr token owner repo =
     Effect.Http.request
         { method = "GET"
-        , headers =
-            [ Effect.Http.header "Authorization" ("Bearer " ++ token)
-            , Effect.Http.header "Accept" "application/json"
-            ]
+        , headers = githubAuthHeaders token "application/json"
         , url = "https://api.github.com/repos/" ++ owner ++ "/" ++ repo ++ "/pulls?state=open&per_page=30"
         , body = Effect.Http.emptyBody
         , expect =
@@ -296,24 +486,78 @@ fetchPullRequests clientIdStr token owner repo =
         }
 
 
-fetchPRDiff : String -> String -> String -> String -> Int -> Command BackendOnly ToFrontend BackendMsg
-fetchPRDiff clientIdStr token owner repo prNumber =
-    Effect.Http.post
-        { url = Env.difftServiceUrl ++ "/pr-diff"
-        , body =
-            Effect.Http.jsonBody
-                (Encode.object
-                    [ ( "owner", Encode.string owner )
-                    , ( "repo", Encode.string repo )
-                    , ( "pr_number", Encode.int prNumber )
-                    , ( "token", Encode.string token )
-                    ]
-                )
-        , expect =
-            expectJson
-                (GotPRDiffResults clientIdStr)
-                (Decode.list difftResultDecoder)
+fetchPRMeta : PRDiffContext -> Command BackendOnly ToFrontend BackendMsg
+fetchPRMeta ctx =
+    Effect.Http.request
+        { method = "GET"
+        , headers = githubAuthHeaders ctx.token "application/json"
+        , url = "https://api.github.com/repos/" ++ ctx.owner ++ "/" ++ ctx.repo ++ "/pulls/" ++ String.fromInt ctx.prNumber
+        , body = Effect.Http.emptyBody
+        , expect = expectJson (GotPRMeta ctx) prMetaDecoder
+        , timeout = Nothing
+        , tracker = Nothing
         }
+
+
+fetchPRFileList : PRDiffContext -> PRMeta -> Command BackendOnly ToFrontend BackendMsg
+fetchPRFileList ctx meta =
+    Effect.Http.request
+        { method = "GET"
+        , headers = githubAuthHeaders ctx.token "application/json"
+        , url =
+            "https://api.github.com/repos/"
+                ++ ctx.owner
+                ++ "/"
+                ++ ctx.repo
+                ++ "/pulls/"
+                ++ String.fromInt ctx.prNumber
+                ++ "/files?per_page=100"
+        , body = Effect.Http.emptyBody
+        , expect = expectJson (GotPRFileList ctx meta) (Decode.list githubPRFileEntryDecoder)
+        , timeout = Nothing
+        , tracker = Nothing
+        }
+
+
+fetchFileContentCommands : PRDiffContext -> PRMeta -> GithubPRFileEntry -> List (Command BackendOnly ToFrontend BackendMsg)
+fetchFileContentCommands ctx meta entry =
+    let
+        fetchAt sha side =
+            Effect.Http.request
+                { method = "GET"
+                , headers = githubAuthHeaders ctx.token "application/vnd.github.raw+json"
+                , url =
+                    "https://api.github.com/repos/"
+                        ++ ctx.owner
+                        ++ "/"
+                        ++ ctx.repo
+                        ++ "/contents/"
+                        ++ percentEncodePath entry.filename
+                        ++ "?ref="
+                        ++ sha
+                , body = Effect.Http.emptyBody
+                , expect = expectRawContentOrEmpty (GotFileContent ctx.requestKey entry.filename side)
+                , timeout = Nothing
+                , tracker = Nothing
+                }
+    in
+    case entry.status of
+        GithubFileAdded ->
+            [ fetchAt meta.headSha RhsSide ]
+
+        GithubFileRemoved ->
+            [ fetchAt meta.baseSha LhsSide ]
+
+        _ ->
+            [ fetchAt meta.baseSha LhsSide, fetchAt meta.headSha RhsSide ]
+
+
+percentEncodePath : String -> String
+percentEncodePath path =
+    path
+        |> String.split "/"
+        |> List.map (\segment -> Url.percentEncode segment)
+        |> String.join "/"
 
 
 
@@ -345,33 +589,44 @@ githubPRDecoder =
         (Decode.at [ "head", "ref" ] Decode.string)
 
 
-difftResultDecoder : Decode.Decoder DifftResult
-difftResultDecoder =
-    Decode.map4 DifftResult
+prMetaDecoder : Decode.Decoder PRMeta
+prMetaDecoder =
+    Decode.map2 PRMeta
+        (Decode.at [ "base", "sha" ] Decode.string)
+        (Decode.at [ "head", "sha" ] Decode.string)
+
+
+githubFileStatusDecoder : Decode.Decoder GithubFileStatus
+githubFileStatusDecoder =
+    Decode.string
+        |> Decode.map
+            (\s ->
+                case s of
+                    "added" ->
+                        GithubFileAdded
+
+                    "removed" ->
+                        GithubFileRemoved
+
+                    "modified" ->
+                        GithubFileModified
+
+                    "renamed" ->
+                        GithubFileRenamed
+
+                    "copied" ->
+                        GithubFileCopied
+
+                    -- GitHub also reports "changed" and "unchanged" for
+                    -- some file kinds (e.g. submodules); treat those as
+                    -- a normal two-sided diff like "modified".
+                    _ ->
+                        GithubFileModified
+            )
+
+
+githubPRFileEntryDecoder : Decode.Decoder GithubPRFileEntry
+githubPRFileEntryDecoder =
+    Decode.map2 GithubPRFileEntry
         (Decode.field "filename" Decode.string)
-        (Decode.field "language" Decode.string)
-        (Decode.field "status" Decode.string)
-        (Decode.field "chunks" (Decode.list (Decode.list diffHunkDecoder)))
-
-
-diffHunkDecoder : Decode.Decoder DiffHunk
-diffHunkDecoder =
-    Decode.map2 DiffHunk
-        (Decode.field "lhs" diffSideDecoder)
-        (Decode.field "rhs" diffSideDecoder)
-
-
-diffSideDecoder : Decode.Decoder DiffSide
-diffSideDecoder =
-    Decode.map2 DiffSide
-        (Decode.field "line_number" Decode.int)
-        (Decode.field "changes" (Decode.list diffChangeDecoder))
-
-
-diffChangeDecoder : Decode.Decoder DiffChange
-diffChangeDecoder =
-    Decode.map4 DiffChange
-        (Decode.field "start" Decode.int)
-        (Decode.field "end" Decode.int)
-        (Decode.field "content" Decode.string)
-        (Decode.field "highlight" Decode.string)
+        (Decode.field "status" githubFileStatusDecoder)

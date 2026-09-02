@@ -3,7 +3,9 @@
 ## Project Type
 - Lamdera full-stack Elm app (GitHub PR viewer with difftastic diff rendering)
 - Uses `lamdera/program-test` for end-to-end testing
-- Companion Node.js service wraps the `difft` CLI for structural diffs
+- Structural diffs are computed client-side in the browser, via a WASM build of
+  difftastic (see `public/difftastic.wasm`) — not a server-side native binary.
+  See `../difftastic` (branch `elm-class-list-injection`) for the Rust source.
 
 ## Git Workflow
 - Implement features on feature branches, not directly on main
@@ -16,7 +18,6 @@
 - **Run E2E**: `npm run test:e2e` (or `npx playwright test`)
 - **Review**: `npm run review` (or `elm-review`)
 - **All checks**: `npm run check`
-- **Difft service**: `npm run difft-server` (runs on port 3001)
 - **elm-test init**: Must use `--compiler $(which lamdera)` flag due to lamdera package constraints
 - Prefer running tests via npm scripts, not raw commands
 
@@ -28,9 +29,25 @@
 
 ## Architecture
 - Frontend handles UI, routing, and rendering diffs
-- Backend handles GitHub OAuth token exchange, GitHub API proxying
-- Difft service (scripts/difft-server.js) wraps the `difft` CLI
-- Backend calls difft service to generate structural diffs
+- Backend handles GitHub OAuth token exchange, and fetches PR file lists plus
+  each changed file's base/head content directly from the GitHub REST API
+  (the OAuth token never leaves the server) — it does NOT compute diffs
+  itself
+- Backend sends the raw file content pairs to Frontend as `PRFilesLoaded`
+- Frontend hands that batch to JS via the `requestDiffs` port
+  (`elm-pkg-js/difft-wasm.js`), which calls into the difftastic wasm module
+  (`public/difft-wasm.js` + `public/difftastic.wasm`) to compute each file's
+  structural diff, and returns the results via the `diffsComputed` port
+- `public/demo.html` is a standalone (no Elm/Lamdera) page for exercising the
+  wasm module directly — useful when debugging the wasm/JS layer in isolation
+- Rebuilding the wasm artifact: in `../difftastic` (branch
+  `elm-class-list-injection`), `cargo +1.85.0 build --lib --release --target
+  wasm32-wasip1`, then copy `target/wasm32-wasip1/release/difftastic.wasm`
+  here to `public/`. Needs `wasi-libc` (`brew install wasi-libc`) and a
+  non-Apple clang with WASI target support (`brew install llvm`) — see that
+  repo's `Cargo.toml` and `src/wasm_api.rs` for the exported functions and
+  the env vars (`CC_wasm32_wasip1`, `AR_wasm32_wasip1`,
+  `CFLAGS_wasm32_wasip1`) the build needs.
 
 ## Custom Types Over Primitives
 - Use custom types (tagged unions) wherever possible

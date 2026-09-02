@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>difftastic wasm demo</title>
+    <style>
+      body { font-family: system-ui, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; }
+      textarea { width: 100%; height: 8rem; font-family: ui-monospace, monospace; font-size: 0.85rem; }
+      .row { display: flex; gap: 1rem; }
+      .row > div { flex: 1; }
+      pre { background: #f4f4f4; padding: 1rem; overflow-x: auto; white-space: pre-wrap; }
+      #status { font-weight: bold; }
+    </style>
+  </head>
+  <body>
+    <h1>difftastic wasm demo</h1>
+    <p id="status">Loading wasm module&hellip;</p>
+
+    <div class="row">
+      <div>
+        <label for="filename">Display path (used to guess language)</label><br />
+        <input id="filename" value="Foo.elm" style="width: 100%" />
+      </div>
+    </div>
+
+    <div class="row">
+      <div>
+        <label for="before">Before</label>
+        <textarea id="before">module Foo exposing (view)
+
+view =
+    div [ class "tw-ml-auto" ] []
+</textarea>
+      </div>
+      <div>
+        <label for="after">After</label>
+        <textarea id="after">module Foo exposing (view)
+
+view =
+    div [ class "tw-ms-auto" ] []
+</textarea>
+      </div>
+    </div>
+
+    <button id="diff-button" disabled>Diff</button>
+
+    <h2>Result</h2>
+    <pre id="output">(not run yet)</pre>
+
+    <script type="module">
+      import { loadDifftastic } from './difft-wasm.js';
+
+      const statusEl = document.getElementById('status');
+      const buttonEl = document.getElementById('diff-button');
+      const outputEl = document.getElementById('output');
+
+      const startedAt = performance.now();
+      const { diffOne } = await loadDifftastic('./difftastic.wasm');
+      const loadMs = Math.round(performance.now() - startedAt);
+
+      statusEl.textContent = `Loaded in ${loadMs}ms.`;
+      buttonEl.disabled = false;
+
+      buttonEl.addEventListener('click', () => {
+        const filename = document.getElementById('filename').value;
+        const before = document.getElementById('before').value;
+        const after = document.getElementById('after').value;
+
+        const startedAt = performance.now();
+        const result = diffOne(filename, before, after);
+        const diffMs = Math.round(performance.now() - startedAt);
+
+        outputEl.textContent = `Diffed in ${diffMs}ms:\n\n` + JSON.stringify(result, null, 2);
+      });
+
+      // Run once automatically so there's something on screen immediately.
+      buttonEl.click();
+    </script>
+  </body>
+</html>

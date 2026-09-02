@@ -6,7 +6,6 @@
     "review": "elm-review",
     "check": "npm run build && npm run test && npm run review && lamdera check",
     "test:e2e": "npx playwright test",
-    "difft-server": "node scripts/difft-server.js",
     "create-pr": "scripts/create-pr.sh"
   },
   "devDependencies": {

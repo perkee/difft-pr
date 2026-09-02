@@ -1,5 +1,6 @@
-module Frontend exposing (..)
+port module Frontend exposing (..)
 
+import Array exposing (Array)
 import Browser
 import Effect.Browser.Navigation as Nav
 import Effect.Command as Command exposing (Command, FrontendOnly)
@@ -9,11 +10,35 @@ import Env
 import Html exposing (..)
 import Html.Attributes as Attr
 import Html.Events exposing (onClick)
+import Json.Decode as Decode
+import Json.Encode as Encode
 import Lamdera
+import Set
 import Types exposing (..)
 import Url
-import Url.Parser
+import Url.Parser exposing ((</>))
 import Url.Parser.Query
+
+
+port requestDiffs : Encode.Value -> Cmd msg
+
+
+port diffsComputed : (Decode.Value -> msg) -> Sub msg
+
+
+{-| `FrontendMsg` is one of Lamdera's "core" types (it gets serialized for
+the time-travel debugger), so it can't hold a raw `Json.Decode.Value` —
+decoding has to happen here, at the port boundary, rather than inside
+`update`.
+-}
+decodeDiffsComputed : Decode.Value -> FrontendMsg
+decodeDiffsComputed value =
+    case Decode.decodeValue wasmResponseDecoder value of
+        Ok result ->
+            GotDiffsFromWasm result
+
+        Err decodeError ->
+            GotDiffsFromWasm (Err (Decode.errorToString decodeError))
 
 
 type alias Model =
@@ -32,7 +57,7 @@ app_ =
     , onUrlChange = UrlChanged
     , update = update
     , updateFromBackend = updateFromBackend
-    , subscriptions = \_ -> Subscription.none
+    , subscriptions = \_ -> Subscription.fromJs "diffsComputed" diffsComputed decodeDiffsComputed
     , view = view
     }
 
@@ -46,7 +71,8 @@ emptyModel key =
     , selectedRepo = Nothing
     , pullRequests = []
     , selectedPR = Nothing
-    , diffResults = []
+    , diffs = DiffsNotStarted
+    , expandedContexts = Set.empty
     , error = Nothing
     }
 
@@ -56,6 +82,28 @@ extractCode url =
     { url | path = "/" }
         |> Url.Parser.parse (Url.Parser.query (Url.Parser.Query.string "code"))
         |> Maybe.andThen identity
+
+
+type Route
+    = HomeRoute
+    | RepoRoute String String
+    | PRRoute String String Int
+    | NotFoundRoute
+
+
+routeParser : Url.Parser.Parser (Route -> a) a
+routeParser =
+    Url.Parser.oneOf
+        [ Url.Parser.map HomeRoute Url.Parser.top
+        , Url.Parser.map RepoRoute (Url.Parser.string </> Url.Parser.string </> Url.Parser.s "pulls")
+        , Url.Parser.map PRRoute (Url.Parser.string </> Url.Parser.string </> Url.Parser.s "pull" </> Url.Parser.int)
+        ]
+
+
+parseRoute : Url.Url -> Route
+parseRoute url =
+    Url.Parser.parse routeParser url
+        |> Maybe.withDefault NotFoundRoute
 
 
 init : Url.Url -> Nav.Key -> ( Model, Command FrontendOnly ToBackend FrontendMsg )
@@ -69,7 +117,8 @@ init url key =
               , selectedRepo = Nothing
               , pullRequests = []
               , selectedPR = Nothing
-              , diffResults = []
+              , diffs = DiffsNotStarted
+              , expandedContexts = Set.empty
               , error = Nothing
               }
             , Command.batch
@@ -95,8 +144,73 @@ update msg model =
                 Browser.External href ->
                     ( model, Nav.load href )
 
-        UrlChanged _ ->
-            ( model, Command.none )
+        UrlChanged url ->
+            case model.githubUser of
+                Nothing ->
+                    ( model, Command.none )
+
+                Just _ ->
+                    case parseRoute url of
+                        HomeRoute ->
+                            ( { model
+                                | page = RepoListPage
+                                , selectedRepo = Nothing
+                                , pullRequests = []
+                                , selectedPR = Nothing
+                                , diffs = DiffsNotStarted
+                                , expandedContexts = Set.empty
+                                , error = Nothing
+                              }
+                            , if List.isEmpty model.repos then
+                                Effect.Lamdera.sendToBackend FetchRepos
+
+                              else
+                                Command.none
+                            )
+
+                        RepoRoute owner repo ->
+                            let
+                                selectedRepo =
+                                    List.filter (\r -> r.owner == owner && r.name == repo) model.repos
+                                        |> List.head
+                                        |> Maybe.withDefault { owner = owner, name = repo, fullName = owner ++ "/" ++ repo }
+                            in
+                            ( { model
+                                | page = PRListPage
+                                , selectedRepo = Just selectedRepo
+                                , pullRequests = []
+                                , selectedPR = Nothing
+                                , diffs = DiffsNotStarted
+                                , expandedContexts = Set.empty
+                                , error = Nothing
+                              }
+                            , Effect.Lamdera.sendToBackend (FetchPullRequests owner repo)
+                            )
+
+                        PRRoute owner repo prNumber ->
+                            let
+                                selectedRepo =
+                                    List.filter (\r -> r.owner == owner && r.name == repo) model.repos
+                                        |> List.head
+                                        |> Maybe.withDefault { owner = owner, name = repo, fullName = owner ++ "/" ++ repo }
+
+                                selectedPR =
+                                    List.filter (\pr -> pr.number == prNumber) model.pullRequests
+                                        |> List.head
+                            in
+                            ( { model
+                                | page = PRDetailPage
+                                , selectedRepo = Just selectedRepo
+                                , selectedPR = selectedPR
+                                , diffs = FetchingPRFiles
+                                , expandedContexts = Set.empty
+                                , error = Nothing
+                              }
+                            , Effect.Lamdera.sendToBackend (FetchPRDiff owner repo prNumber)
+                            )
+
+                        NotFoundRoute ->
+                            ( model, Command.none )
 
         LoginClicked ->
             ( model
@@ -104,56 +218,60 @@ update msg model =
             )
 
         SelectRepo repo ->
-            ( { model
-                | selectedRepo = Just repo
-                , page = PRListPage
-                , pullRequests = []
-                , error = Nothing
-              }
-            , Effect.Lamdera.sendToBackend (FetchPullRequests repo.owner repo.name)
+            ( model
+            , Nav.pushUrl model.key ("/" ++ repo.owner ++ "/" ++ repo.name ++ "/pulls")
             )
 
         SelectPR pr ->
             case model.selectedRepo of
                 Just repo ->
-                    ( { model
-                        | selectedPR = Just pr
-                        , page = PRDetailPage
-                        , diffResults = []
-                        , error = Nothing
-                      }
-                    , Effect.Lamdera.sendToBackend (FetchPRDiff repo.owner repo.name pr.number)
+                    ( model
+                    , Nav.pushUrl model.key ("/" ++ repo.owner ++ "/" ++ repo.name ++ "/pull/" ++ String.fromInt pr.number)
                     )
 
                 Nothing ->
                     ( model, Command.none )
 
         BackToRepos ->
-            ( { model
-                | page = RepoListPage
-                , selectedRepo = Nothing
-                , pullRequests = []
-                , selectedPR = Nothing
-                , diffResults = []
-                , error = Nothing
-              }
-            , Command.none
+            ( model
+            , Nav.pushUrl model.key "/"
             )
 
         BackToPRs ->
+            case model.selectedRepo of
+                Just repo ->
+                    ( model
+                    , Nav.pushUrl model.key ("/" ++ repo.owner ++ "/" ++ repo.name ++ "/pulls")
+                    )
+
+                Nothing ->
+                    ( model
+                    , Nav.pushUrl model.key "/"
+                    )
+
+        LogoutClicked ->
+            ( emptyModel model.key
+            , Command.batch
+                [ Effect.Lamdera.sendToBackend LogoutSession
+                , Nav.pushUrl model.key "/"
+                ]
+            )
+
+        ExpandContext filename gapIndex ->
             ( { model
-                | page = PRListPage
-                , selectedPR = Nothing
-                , diffResults = []
-                , error = Nothing
+                | expandedContexts =
+                    Set.insert (filename ++ ":" ++ String.fromInt gapIndex) model.expandedContexts
               }
             , Command.none
             )
 
-        LogoutClicked ->
-            ( emptyModel model.key
-            , Effect.Lamdera.sendToBackend LogoutSession
-            )
+        GotDiffsFromWasm result ->
+            case result of
+                Ok fileDiffs ->
+                    ( { model | diffs = DiffsReady fileDiffs }, Command.none )
+
+                Err errorMessage ->
+                    ( { model | diffs = DiffsFetchFailed errorMessage }, Command.none )
 
 
 updateFromBackend : ToFrontend -> Model -> ( Model, Command FrontendOnly ToBackend FrontendMsg )
@@ -179,11 +297,16 @@ updateFromBackend msg model =
         PullRequestsLoaded prs ->
             ( { model | pullRequests = prs }, Command.none )
 
-        DiffResultsLoaded results ->
-            ( { model | diffResults = results }, Command.none )
+        PRFilesLoaded files ->
+            ( { model | diffs = ComputingDiffsInBrowser files }
+            , Command.sendToJs "requestDiffs" requestDiffs (encodePRFiles files)
+            )
+
+        PRDiffFetchFailed error ->
+            ( { model | diffs = DiffsFetchFailed error }, Command.none )
 
         LoggedOut ->
-            ( emptyModel model.key, Command.none )
+            ( emptyModel model.key, Nav.replaceUrl model.key "/" )
 
 
 githubOAuthUrl : String -> String
@@ -191,6 +314,307 @@ githubOAuthUrl clientId =
     "https://github.com/login/oauth/authorize?client_id="
         ++ clientId
         ++ "&scope=repo"
+
+
+
+-- WASM PORT ENCODING / DECODING
+
+
+encodePRFiles : List PRFile -> Encode.Value
+encodePRFiles files =
+    Encode.list encodePRFile files
+
+
+encodePRFile : PRFile -> Encode.Value
+encodePRFile file =
+    Encode.object
+        [ ( "filename", Encode.string file.filename )
+        , ( "status", Encode.string (githubFileStatusToString file.status) )
+        , ( "lhsContent", Encode.string file.lhsContent )
+        , ( "rhsContent", Encode.string file.rhsContent )
+        ]
+
+
+githubFileStatusToString : GithubFileStatus -> String
+githubFileStatusToString status =
+    case status of
+        GithubFileAdded ->
+            "added"
+
+        GithubFileRemoved ->
+            "removed"
+
+        GithubFileModified ->
+            "modified"
+
+        GithubFileRenamed ->
+            "renamed"
+
+        GithubFileCopied ->
+            "copied"
+
+
+githubFileStatusDecoder : Decode.Decoder GithubFileStatus
+githubFileStatusDecoder =
+    Decode.string
+        |> Decode.andThen
+            (\s ->
+                case s of
+                    "added" ->
+                        Decode.succeed GithubFileAdded
+
+                    "removed" ->
+                        Decode.succeed GithubFileRemoved
+
+                    "modified" ->
+                        Decode.succeed GithubFileModified
+
+                    "renamed" ->
+                        Decode.succeed GithubFileRenamed
+
+                    "copied" ->
+                        Decode.succeed GithubFileCopied
+
+                    other ->
+                        Decode.fail ("Unknown file status: " ++ other)
+            )
+
+
+{-| The JS side (elm-pkg-js/difft-wasm.js) always responds with either
+`{ ok: true, results: [...] }` or `{ ok: false, error: "..." }` — this
+mirrors that shape as `Ok (List FileDiff)` / `Err String`, so a
+JS-side failure and an Elm-side decode failure both end up in the same
+place (`DiffsFetchFailed`) without a third "something went wrong, who
+knows what shape it's in" case to handle.
+-}
+wasmResponseDecoder : Decode.Decoder (Result String (List FileDiff))
+wasmResponseDecoder =
+    Decode.field "ok" Decode.bool
+        |> Decode.andThen
+            (\ok ->
+                if ok then
+                    Decode.field "results" (Decode.list fileDiffDecoder) |> Decode.map Ok
+
+                else
+                    Decode.field "error" Decode.string |> Decode.map Err
+            )
+
+
+fileDiffDecoder : Decode.Decoder FileDiff
+fileDiffDecoder =
+    Decode.map5 FileDiff
+        (Decode.field "filename" Decode.string)
+        (Decode.field "status" githubFileStatusDecoder)
+        (Decode.field "lhsContent" Decode.string)
+        (Decode.field "rhsContent" Decode.string)
+        diffOutcomeDecoder
+
+
+diffOutcomeDecoder : Decode.Decoder DiffOutcome
+diffOutcomeDecoder =
+    Decode.oneOf
+        [ Decode.field "diff" difftResultDecoder |> Decode.map DiffComputed
+        , Decode.field "error" Decode.string |> Decode.map DiffFailed
+        ]
+
+
+difftResultDecoder : Decode.Decoder DifftResult
+difftResultDecoder =
+    Decode.map4 DifftResult
+        (Decode.field "path" Decode.string)
+        (Decode.field "language" Decode.string)
+        (Decode.field "status" diffStatusDecoder)
+        (Decode.field "chunks" (Decode.list (Decode.list diffHunkDecoder)))
+
+
+diffStatusDecoder : Decode.Decoder DiffStatus
+diffStatusDecoder =
+    Decode.string
+        |> Decode.andThen
+            (\s ->
+                case s of
+                    "unchanged" ->
+                        Decode.succeed StatusUnchanged
+
+                    "changed" ->
+                        Decode.succeed StatusChanged
+
+                    "created" ->
+                        Decode.succeed StatusCreated
+
+                    "deleted" ->
+                        Decode.succeed StatusDeleted
+
+                    other ->
+                        Decode.fail ("Unknown diff status: " ++ other)
+            )
+
+
+diffHunkDecoder : Decode.Decoder DiffHunk
+diffHunkDecoder =
+    Decode.map2 DiffHunk
+        (Decode.maybe (Decode.field "lhs" diffSideDecoder))
+        (Decode.maybe (Decode.field "rhs" diffSideDecoder))
+
+
+diffSideDecoder : Decode.Decoder DiffSide
+diffSideDecoder =
+    Decode.map2 DiffSide
+        (Decode.field "line_number" Decode.int)
+        (Decode.field "changes" (Decode.list diffChangeDecoder))
+
+
+diffChangeDecoder : Decode.Decoder DiffChange
+diffChangeDecoder =
+    Decode.map4 DiffChange
+        (Decode.field "start" Decode.int)
+        (Decode.field "end" Decode.int)
+        (Decode.field "content" Decode.string)
+        (Decode.field "highlight" highlightDecoder)
+
+
+highlightDecoder : Decode.Decoder Highlight
+highlightDecoder =
+    Decode.string
+        |> Decode.andThen
+            (\s ->
+                case s of
+                    "delimiter" ->
+                        Decode.succeed HighlightDelimiter
+
+                    "normal" ->
+                        Decode.succeed HighlightNormal
+
+                    "string" ->
+                        Decode.succeed HighlightString
+
+                    "type" ->
+                        Decode.succeed HighlightType
+
+                    "comment" ->
+                        Decode.succeed HighlightComment
+
+                    "keyword" ->
+                        Decode.succeed HighlightKeyword
+
+                    "tree_sitter_error" ->
+                        Decode.succeed HighlightTreeSitterError
+
+                    other ->
+                        Decode.fail ("Unknown highlight: " ++ other)
+            )
+
+
+
+-- WHITESPACE RENDERING
+
+
+renderWithWhitespace : String -> List (Html msg)
+renderWithWhitespace str =
+    groupCharRuns (String.toList str) []
+        |> List.map
+            (\( isWs, content ) ->
+                if isWs then
+                    span [ Attr.class "ws" ]
+                        [ text (String.map wsChar content) ]
+
+                else
+                    text content
+            )
+
+
+wsChar : Char -> Char
+wsChar c =
+    case c of
+        ' ' ->
+            '·'
+
+        '\t' ->
+            '⇥'
+
+        _ ->
+            c
+
+
+isWhitespace : Char -> Bool
+isWhitespace c =
+    c == ' ' || c == '\t'
+
+
+groupCharRuns : List Char -> List ( Bool, String ) -> List ( Bool, String )
+groupCharRuns chars acc =
+    case chars of
+        [] ->
+            List.reverse acc
+
+        first :: rest ->
+            let
+                ws =
+                    isWhitespace first
+
+                ( same, remaining ) =
+                    spanWhile (\c -> isWhitespace c == ws) rest
+            in
+            groupCharRuns remaining (( ws, String.fromList (first :: same) ) :: acc)
+
+
+spanWhile : (a -> Bool) -> List a -> ( List a, List a )
+spanWhile pred list =
+    case list of
+        [] ->
+            ( [], [] )
+
+        x :: xs ->
+            if pred x then
+                let
+                    ( matching, rest ) =
+                        spanWhile pred xs
+                in
+                ( x :: matching, rest )
+
+            else
+                ( [], list )
+
+
+
+-- CONTEXT LINE COMPUTATION
+
+
+contextSize : Int
+contextSize =
+    3
+
+
+type alias ChunkRange =
+    { lhsMin : Int
+    , lhsMax : Int
+    , rhsMin : Int
+    , rhsMax : Int
+    }
+
+
+chunkGroupRange : List DiffHunk -> ChunkRange
+chunkGroupRange hunks =
+    let
+        lhsLines =
+            List.filterMap (Maybe.map .lineNumber << .lhs) hunks
+
+        rhsLines =
+            List.filterMap (Maybe.map .lineNumber << .rhs) hunks
+
+        fallbackMin =
+            List.minimum rhsLines
+                |> Maybe.withDefault (List.minimum lhsLines |> Maybe.withDefault 0)
+
+        fallbackMax =
+            List.maximum rhsLines
+                |> Maybe.withDefault (List.maximum lhsLines |> Maybe.withDefault 0)
+    in
+    { lhsMin = List.minimum lhsLines |> Maybe.withDefault fallbackMin
+    , lhsMax = List.maximum lhsLines |> Maybe.withDefault fallbackMax
+    , rhsMin = List.minimum rhsLines |> Maybe.withDefault fallbackMin
+    , rhsMax = List.maximum rhsLines |> Maybe.withDefault fallbackMax
+    }
 
 
 
@@ -365,66 +789,276 @@ viewPRDetail model =
 
             Nothing ->
                 text ""
-        , if List.isEmpty model.diffResults then
-            p [] [ text "Loading diffs..." ]
-
-          else
-            div [ Attr.class "diff-results" ]
-                (List.map viewDifftResult model.diffResults)
+        , viewDiffs model.expandedContexts model.diffs
         ]
 
 
-viewDifftResult : DifftResult -> Html msg
-viewDifftResult result =
+viewDiffs : Set.Set String -> DiffsState -> Html FrontendMsg
+viewDiffs expandedSet diffs =
+    case diffs of
+        DiffsNotStarted ->
+            text ""
+
+        FetchingPRFiles ->
+            p [] [ text "Fetching changed files from GitHub..." ]
+
+        ComputingDiffsInBrowser _ ->
+            p [] [ text "Computing structural diffs..." ]
+
+        DiffsFetchFailed err ->
+            div [ Attr.class "error" ] [ text err ]
+
+        DiffsReady fileDiffs ->
+            div [ Attr.class "diff-results" ]
+                (List.map (viewFileDiff expandedSet) fileDiffs)
+
+
+viewFileDiff : Set.Set String -> FileDiff -> Html FrontendMsg
+viewFileDiff expandedSet fileDiff =
     div [ Attr.class "diff-file" ]
         [ div [ Attr.class "diff-file-header" ]
-            [ span [ Attr.class "diff-filename" ] [ text result.filename ]
-            , span [ Attr.class "diff-language" ] [ text result.language ]
-            , span [ Attr.class ("diff-status diff-status-" ++ result.status) ] [ text result.status ]
+            [ span [ Attr.class "diff-filename" ] [ text fileDiff.filename ]
+            , case fileDiff.outcome of
+                DiffComputed result ->
+                    span [ Attr.class "diff-language" ] [ text result.language ]
+
+                DiffFailed _ ->
+                    text ""
+            , span
+                [ Attr.class ("diff-status diff-status-" ++ githubFileStatusToString fileDiff.status) ]
+                [ text (githubFileStatusLabel fileDiff.status) ]
             ]
-        , if List.isEmpty result.chunks then
-            div [ Attr.class "diff-empty" ]
-                [ text
-                    (if result.status == "unchanged" then
-                        "No changes"
+        , case fileDiff.outcome of
+            DiffComputed result ->
+                viewDiffBody expandedSet fileDiff result
 
-                     else
-                        ""
-                    )
-                ]
-
-          else
-            div [ Attr.class "diff-chunks" ]
-                (List.indexedMap viewChunkGroup result.chunks)
+            DiffFailed err ->
+                div [ Attr.class "error" ] [ text ("Failed to diff this file: " ++ err) ]
         ]
 
 
-viewChunkGroup : Int -> List DiffHunk -> Html msg
-viewChunkGroup index hunks =
-    div [ Attr.class "chunk-group" ]
-        (if index > 0 then
-            div [ Attr.class "chunk-separator" ] [ text "···" ] :: List.map viewHunk hunks
+githubFileStatusLabel : GithubFileStatus -> String
+githubFileStatusLabel status =
+    case status of
+        GithubFileAdded ->
+            "added"
 
-         else
-            List.map viewHunk hunks
-        )
+        GithubFileRemoved ->
+            "removed"
+
+        GithubFileModified ->
+            "modified"
+
+        GithubFileRenamed ->
+            "renamed"
+
+        GithubFileCopied ->
+            "copied"
+
+
+viewDiffBody : Set.Set String -> FileDiff -> DifftResult -> Html FrontendMsg
+viewDiffBody expandedSet fileDiff result =
+    let
+        lhsLines =
+            Array.fromList (String.split "\n" fileDiff.lhsContent)
+
+        rhsLines =
+            Array.fromList (String.split "\n" fileDiff.rhsContent)
+
+        ranges =
+            List.map chunkGroupRange result.chunks
+
+        totalRhsLines =
+            Array.length rhsLines
+
+        sections =
+            buildSections fileDiff.filename totalRhsLines result.chunks ranges
+    in
+    div [ Attr.class "diff-chunks" ]
+        (List.map (viewSection lhsLines rhsLines expandedSet) sections)
+
+
+type DiffSection
+    = GapSection GapInfo
+    | ChunkSection (List DiffHunk)
+
+
+type alias GapInfo =
+    { filename : String
+    , gapIndex : Int
+    , rhsStart : Int
+    , rhsEnd : Int
+    , lhsStart : Int
+    , lhsEnd : Int
+    }
+
+
+buildSections : String -> Int -> List (List DiffHunk) -> List ChunkRange -> List DiffSection
+buildSections filename totalRhsLines chunks ranges =
+    let
+        go lhsPos rhsPos gapIdx remainingChunks remainingRanges acc =
+            case ( remainingChunks, remainingRanges ) of
+                ( chunk :: restC, range :: restR ) ->
+                    let
+                        gap =
+                            GapSection
+                                { filename = filename
+                                , gapIndex = gapIdx
+                                , rhsStart = rhsPos
+                                , rhsEnd = range.rhsMin - 1
+                                , lhsStart = lhsPos
+                                , lhsEnd = range.lhsMin - 1
+                                }
+                    in
+                    go (range.lhsMax + 1) (range.rhsMax + 1) (gapIdx + 1) restC restR (acc ++ [ gap, ChunkSection chunk ])
+
+                _ ->
+                    let
+                        finalGap =
+                            GapSection
+                                { filename = filename
+                                , gapIndex = gapIdx
+                                , rhsStart = rhsPos
+                                , rhsEnd = totalRhsLines - 1
+                                , lhsStart = lhsPos
+                                , lhsEnd = totalRhsLines - 1
+                                }
+                    in
+                    acc ++ [ finalGap ]
+    in
+    go 0 0 0 chunks ranges []
+
+
+viewSection : Array String -> Array String -> Set.Set String -> DiffSection -> Html FrontendMsg
+viewSection lhsLines rhsLines expandedSet section =
+    case section of
+        GapSection gap ->
+            viewGapSection lhsLines rhsLines expandedSet gap
+
+        ChunkSection hunks ->
+            div [ Attr.class "chunk-group" ]
+                (List.map viewHunk hunks)
+
+
+viewGapSection : Array String -> Array String -> Set.Set String -> GapInfo -> Html FrontendMsg
+viewGapSection lhsLines rhsLines expandedSet gap =
+    let
+        rhsGapSize =
+            gap.rhsEnd - gap.rhsStart + 1
+
+        lhsGapSize =
+            gap.lhsEnd - gap.lhsStart + 1
+
+        gapSize =
+            min rhsGapSize lhsGapSize
+
+        isExpanded =
+            Set.member (gap.filename ++ ":" ++ String.fromInt gap.gapIndex) expandedSet
+    in
+    if gapSize <= 0 then
+        text ""
+
+    else if gapSize <= 2 * contextSize || isExpanded then
+        div [ Attr.class "context-lines" ]
+            (List.map
+                (\i ->
+                    viewContextLine
+                        (gap.lhsStart + i)
+                        (Array.get (gap.lhsStart + i) lhsLines |> Maybe.withDefault "")
+                        (gap.rhsStart + i)
+                        (Array.get (gap.rhsStart + i) rhsLines |> Maybe.withDefault "")
+                )
+                (List.range 0 (gapSize - 1))
+            )
+
+    else
+        let
+            hiddenCount =
+                gapSize - 2 * contextSize
+        in
+        div [ Attr.class "context-lines" ]
+            (List.map
+                (\i ->
+                    viewContextLine
+                        (gap.lhsStart + i)
+                        (Array.get (gap.lhsStart + i) lhsLines |> Maybe.withDefault "")
+                        (gap.rhsStart + i)
+                        (Array.get (gap.rhsStart + i) rhsLines |> Maybe.withDefault "")
+                )
+                (List.range 0 (contextSize - 1))
+                ++ [ viewExpandButton gap.filename gap.gapIndex hiddenCount ]
+                ++ List.map
+                    (\i ->
+                        let
+                            offset =
+                                gapSize - contextSize + i
+                        in
+                        viewContextLine
+                            (gap.lhsStart + offset)
+                            (Array.get (gap.lhsStart + offset) lhsLines |> Maybe.withDefault "")
+                            (gap.rhsStart + offset)
+                            (Array.get (gap.rhsStart + offset) rhsLines |> Maybe.withDefault "")
+                    )
+                    (List.range 0 (contextSize - 1))
+            )
+
+
+viewContextLine : Int -> String -> Int -> String -> Html msg
+viewContextLine lhsLineNum lhsContent rhsLineNum rhsContent =
+    div [ Attr.class "hunk context-line" ]
+        [ div [ Attr.class "hunk-side" ]
+            [ span [ Attr.class "line-number" ] [ text (String.fromInt (lhsLineNum + 1)) ]
+            , span [ Attr.class "line-content" ] (renderWithWhitespace lhsContent)
+            ]
+        , div [ Attr.class "hunk-side" ]
+            [ span [ Attr.class "line-number" ] [ text (String.fromInt (rhsLineNum + 1)) ]
+            , span [ Attr.class "line-content" ] (renderWithWhitespace rhsContent)
+            ]
+        ]
+
+
+viewExpandButton : String -> Int -> Int -> Html FrontendMsg
+viewExpandButton filename gapIndex hiddenCount =
+    div [ Attr.class "expand-row" ]
+        [ button
+            [ onClick (ExpandContext filename gapIndex)
+            , Attr.class "btn btn-expand"
+            ]
+            [ text ("\u{2195} Show " ++ String.fromInt hiddenCount ++ " hidden lines") ]
+        ]
 
 
 viewHunk : DiffHunk -> Html msg
 viewHunk hunk =
     div [ Attr.class "hunk" ]
         [ div [ Attr.class "hunk-side hunk-lhs" ]
-            [ span [ Attr.class "line-number" ]
-                [ text (String.fromInt (hunk.lhs.lineNumber + 1)) ]
-            , span [ Attr.class "line-content" ]
-                (viewChanges "removed" hunk.lhs.changes)
-            ]
+            (case hunk.lhs of
+                Just side ->
+                    [ span [ Attr.class "line-number" ]
+                        [ text (String.fromInt (side.lineNumber + 1)) ]
+                    , span [ Attr.class "line-content" ]
+                        (viewChanges "removed" side.changes)
+                    ]
+
+                Nothing ->
+                    [ span [ Attr.class "line-number" ] []
+                    , span [ Attr.class "line-content" ] []
+                    ]
+            )
         , div [ Attr.class "hunk-side hunk-rhs" ]
-            [ span [ Attr.class "line-number" ]
-                [ text (String.fromInt (hunk.rhs.lineNumber + 1)) ]
-            , span [ Attr.class "line-content" ]
-                (viewChanges "added" hunk.rhs.changes)
-            ]
+            (case hunk.rhs of
+                Just side ->
+                    [ span [ Attr.class "line-number" ]
+                        [ text (String.fromInt (side.lineNumber + 1)) ]
+                    , span [ Attr.class "line-content" ]
+                        (viewChanges "added" side.changes)
+                    ]
+
+                Nothing ->
+                    [ span [ Attr.class "line-number" ] []
+                    , span [ Attr.class "line-content" ] []
+                    ]
+            )
         ]
 
 
@@ -433,10 +1067,35 @@ viewChanges side changes =
     List.map
         (\change ->
             span
-                [ Attr.class ("diff-change diff-change-" ++ side ++ " highlight-" ++ change.highlight) ]
-                [ text change.content ]
+                [ Attr.class ("diff-change diff-change-" ++ side ++ " highlight-" ++ highlightClass change.highlight) ]
+                (renderWithWhitespace change.content)
         )
         changes
+
+
+highlightClass : Highlight -> String
+highlightClass highlight =
+    case highlight of
+        HighlightDelimiter ->
+            "delimiter"
+
+        HighlightNormal ->
+            "normal"
+
+        HighlightString ->
+            "string"
+
+        HighlightType ->
+            "type"
+
+        HighlightComment ->
+            "comment"
+
+        HighlightKeyword ->
+            "keyword"
+
+        HighlightTreeSitterError ->
+            "tree-sitter-error"
 
 
 css : String
@@ -444,7 +1103,7 @@ css =
     """
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0d1117; color: #c9d1d9; }
-.app { max-width: 1200px; margin: 0 auto; padding: 0 16px; }
+.app { max-width: 1400px; margin: 0 auto; padding: 0 16px; }
 .header { display: flex; justify-content: space-between; align-items: center; padding: 16px 0; border-bottom: 1px solid #30363d; }
 .header h1 { font-size: 20px; color: #58a6ff; }
 .user-info { display: flex; align-items: center; gap: 8px; }
@@ -475,21 +1134,30 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .diff-filename { font-family: 'SF Mono', 'Fira Code', monospace; font-weight: 600; color: #c9d1d9; flex: 1; }
 .diff-language { color: #8b949e; }
 .diff-status { padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; }
-.diff-status-changed { background: #3fb95040; color: #3fb950; }
+.diff-status-modified { background: #3fb95040; color: #3fb950; }
 .diff-status-added { background: #23863640; color: #3fb950; }
 .diff-status-removed { background: #f8514940; color: #f85149; }
-.diff-empty { padding: 16px; color: #8b949e; text-align: center; }
+.diff-status-renamed { background: #a37ade40; color: #a37ade; }
+.diff-status-copied { background: #a37ade40; color: #a37ade; }
+.diff-chunks { overflow-x: auto; }
 .chunk-group { padding: 0; }
-.chunk-separator { text-align: center; padding: 4px 0; color: #484f58; background: #0d1117; }
 .hunk { display: flex; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; line-height: 20px; }
 .hunk-side { flex: 1; display: flex; padding: 0 8px; min-width: 0; }
 .hunk-lhs { background: #1c1210; border-right: 1px solid #30363d; }
 .hunk-rhs { background: #0f1a10; }
+.context-line .hunk-side { background: #0d1117; }
+.context-line .hunk-side:first-child { border-right: 1px solid #30363d; }
 .line-number { color: #484f58; min-width: 48px; text-align: right; padding-right: 12px; user-select: none; flex-shrink: 0; }
-.line-content { white-space: pre-wrap; word-break: break-all; flex: 1; min-width: 0; }
+.line-content { white-space: pre; tab-size: 4; flex: 1; min-width: 0; }
 .diff-change-removed { background: #67060c80; color: #ffa198; }
 .diff-change-added { background: #03501580; color: #7ee787; }
 .highlight-string { font-style: italic; }
 .highlight-keyword { font-weight: bold; }
+.highlight-comment { opacity: 0.75; }
+.highlight-tree-sitter-error { text-decoration: wavy underline #f85149; }
+.ws { color: #3b4048; }
+.expand-row { text-align: center; background: #161b22; padding: 4px 0; border-top: 1px solid #21262d; border-bottom: 1px solid #21262d; }
+.btn-expand { color: #58a6ff; font-size: 12px; font-family: 'SF Mono', 'Fira Code', monospace; }
+.btn-expand:hover { text-decoration: underline; }
 h2 { margin-bottom: 16px; color: #f0f6fc; }
 """
