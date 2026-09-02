@@ -110,7 +110,14 @@ export async function loadDifftastic(wasmUrl) {
   // else outright. Fetching the bytes and instantiating them directly
   // works regardless of the server's MIME type configuration, at the
   // cost of streaming compilation.
-  const bytes = await fetch(wasmUrl).then((response) => response.arrayBuffer());
+  //
+  // cache: 'no-cache' forces revalidation with the server on every load,
+  // because a silently stale cached copy of this artifact is worse than
+  // useless: the app keeps running, but with the previous build's
+  // behavior and output shape. When the file hasn't changed the server
+  // answers 304 and the cached bytes are reused, so this costs one
+  // conditional request, not a re-download.
+  const bytes = await fetch(wasmUrl, { cache: 'no-cache' }).then((response) => response.arrayBuffer());
   const { instance } = await WebAssembly.instantiate(bytes, {
     wasi_snapshot_preview1: wasiImports,
   });
