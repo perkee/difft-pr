@@ -212,6 +212,8 @@ type FrontendMsg
     | LogoutClicked
     | ExpandContext String Int
     | GotDiffsFromWasm (Result String (List FileDiff))
+    | CancelAuthentication
+    | AuthAttemptTimedOut
 
 
 type ToBackend

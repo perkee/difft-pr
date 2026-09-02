@@ -2,10 +2,13 @@ port module Frontend exposing (..)
 
 import Array exposing (Array)
 import Browser
+import Duration
 import Effect.Browser.Navigation as Nav
 import Effect.Command as Command exposing (Command, FrontendOnly)
 import Effect.Lamdera
+import Effect.Process
 import Effect.Subscription as Subscription
+import Effect.Task
 import Env
 import Html exposing (..)
 import Html.Attributes as Attr
@@ -124,6 +127,7 @@ init url key =
             , Command.batch
                 [ Effect.Lamdera.sendToBackend (AuthenticateWithCode code)
                 , Nav.replaceUrl key "/"
+                , authTimeoutCommand
                 ]
             )
 
@@ -131,6 +135,23 @@ init url key =
             ( emptyModel key
             , Command.none
             )
+
+
+{-| The GitHub token exchange is an async round-trip through the backend
+(see Backend.exchangeCodeForToken), and there's no guarantee it ever
+resolves from the frontend's point of view — most notably, a `lamdera
+live` recompile mid-flight orphans the in-flight request's response (it
+gets routed to a ClientId that no longer exists once reconnected, and is
+silently dropped). Without this, that leaves the user stuck on
+LoadingPage forever with no way out but a full server restart.
+
+Guarded on still being on LoadingPage when it fires (see `update`'s
+AuthAttemptTimedOut case), so a login that actually completes in time
+isn't disrupted by a late timeout.
+-}
+authTimeoutCommand : Command FrontendOnly ToBackend FrontendMsg
+authTimeoutCommand =
+    Effect.Task.perform (\() -> AuthAttemptTimedOut) (Effect.Process.sleep (Duration.seconds 20))
 
 
 update : FrontendMsg -> Model -> ( Model, Command FrontendOnly ToBackend FrontendMsg )
@@ -272,6 +293,22 @@ update msg model =
 
                 Err errorMessage ->
                     ( { model | diffs = DiffsFetchFailed errorMessage }, Command.none )
+
+        CancelAuthentication ->
+            ( { model | page = LoginPage, error = Nothing }, Command.none )
+
+        AuthAttemptTimedOut ->
+            case model.page of
+                LoadingPage ->
+                    ( { model
+                        | page = LoginPage
+                        , error = Just "Authentication timed out. Please try signing in again."
+                      }
+                    , Command.none
+                    )
+
+                _ ->
+                    ( model, Command.none )
 
 
 updateFromBackend : ToFrontend -> Model -> ( Model, Command FrontendOnly ToBackend FrontendMsg )
@@ -703,9 +740,12 @@ viewLogin =
         ]
 
 
-viewLoading : Html msg
+viewLoading : Html FrontendMsg
 viewLoading =
-    div [ Attr.class "loading" ] [ text "Authenticating..." ]
+    div [ Attr.class "loading" ]
+        [ p [] [ text "Authenticating..." ]
+        , button [ onClick CancelAuthentication, Attr.class "btn btn-link" ] [ text "Taking too long? Cancel and go back" ]
+        ]
 
 
 viewRepoList : Model -> Html FrontendMsg
