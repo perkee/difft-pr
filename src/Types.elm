@@ -178,6 +178,7 @@ type alias FrontendModel =
     , selectedPR : Maybe GithubPullRequest
     , diffs : DiffsState
     , expandedContexts : Set String
+    , fileFilter : String
     , error : Maybe String
     }
 
@@ -233,6 +234,9 @@ type FrontendMsg
     | CancelAuthentication
     | AuthAttemptTimedOut
     | DeferredSendToBackend ToBackend
+    | FileFilterChanged String
+    | FileTreeFileClicked String
+    | NoOpFrontendMsg
 
 
 type ToBackend

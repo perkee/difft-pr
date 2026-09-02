@@ -4,6 +4,7 @@ import Array exposing (Array)
 import Browser
 import Dict exposing (Dict)
 import Duration
+import Effect.Browser.Dom
 import Effect.Browser.Navigation as Nav
 import Effect.Command as Command exposing (Command, FrontendOnly)
 import Effect.Lamdera
@@ -11,6 +12,7 @@ import Effect.Process
 import Effect.Subscription as Subscription
 import Effect.Task
 import Env
+import FileTree
 import Html exposing (..)
 import Html.Attributes as Attr
 import Html.Events exposing (onClick)
@@ -78,6 +80,7 @@ emptyModel key url =
     , selectedPR = Nothing
     , diffs = DiffsNotStarted
     , expandedContexts = Set.empty
+    , fileFilter = ""
     , error = Nothing
     }
 
@@ -125,6 +128,7 @@ init url key =
               , selectedPR = Nothing
               , diffs = DiffsNotStarted
               , expandedContexts = Set.empty
+              , fileFilter = ""
               , error = Nothing
               }
             , Command.batch
@@ -179,6 +183,21 @@ sendToBackendAfterConnect message =
     Effect.Task.perform
         (\() -> DeferredSendToBackend message)
         (Effect.Process.sleep (Duration.milliseconds 500))
+
+
+{-| The DOM id a file's diff card renders under, used by the file tree
+to scroll it into view.
+-}
+fileDomId : String -> String
+fileDomId filename =
+    "file-" ++ filename
+
+
+scrollToFile : String -> Command FrontendOnly ToBackend FrontendMsg
+scrollToFile filename =
+    Effect.Browser.Dom.getElement (Effect.Browser.Dom.id (fileDomId filename))
+        |> Effect.Task.andThen (\found -> Effect.Browser.Dom.setViewport 0 (found.element.y - 8))
+        |> Effect.Task.attempt (\_ -> NoOpFrontendMsg)
 
 
 update : FrontendMsg -> Model -> ( Model, Command FrontendOnly ToBackend FrontendMsg )
@@ -284,6 +303,15 @@ update msg model =
         DeferredSendToBackend message ->
             ( model, Effect.Lamdera.sendToBackend message )
 
+        FileFilterChanged filterText ->
+            ( { model | fileFilter = filterText }, Command.none )
+
+        FileTreeFileClicked filename ->
+            ( model, scrollToFile filename )
+
+        NoOpFrontendMsg ->
+            ( model, Command.none )
+
 
 {-| Materialize the page for the model's current URL. Assumes the user
 is authenticated — callers guard on that. Used both when the URL changes
@@ -302,6 +330,7 @@ showRoute model =
                 , selectedPR = Nothing
                 , diffs = DiffsNotStarted
                 , expandedContexts = Set.empty
+                , fileFilter = ""
                 , error = Nothing
               }
             , if List.isEmpty model.repos then
@@ -325,6 +354,7 @@ showRoute model =
                 , selectedPR = Nothing
                 , diffs = DiffsNotStarted
                 , expandedContexts = Set.empty
+                , fileFilter = ""
                 , error = Nothing
               }
             , Effect.Lamdera.sendToBackend (FetchPullRequests owner repo)
@@ -347,6 +377,7 @@ showRoute model =
                 , selectedPR = selectedPR
                 , diffs = FetchingPRFiles
                 , expandedContexts = Set.empty
+                , fileFilter = ""
                 , error = Nothing
               }
             , Effect.Lamdera.sendToBackend (FetchPRDiff owner repo prNumber)
@@ -363,6 +394,7 @@ showRoute model =
                 , selectedPR = Nothing
                 , diffs = DiffsNotStarted
                 , expandedContexts = Set.empty
+                , fileFilter = ""
                 , error = Nothing
               }
             , if List.isEmpty model.repos then
@@ -915,8 +947,47 @@ viewPRDetail model =
 
             Nothing ->
                 text ""
-        , viewDiffs model.expandedContexts model.diffs
+        , case treeFilesOf model.diffs of
+            [] ->
+                viewDiffs model.expandedContexts model.diffs
+
+            treeFiles ->
+                div [ Attr.class "pr-layout" ]
+                    [ div [ Attr.class "pr-sidebar" ]
+                        [ FileTree.view
+                            { filterText = model.fileFilter
+                            , onFilterChanged = FileFilterChanged
+                            , onFileSelected = FileTreeFileClicked
+                            }
+                            treeFiles
+                        ]
+                    , div [ Attr.class "pr-main" ]
+                        [ viewDiffs model.expandedContexts model.diffs ]
+                    ]
         ]
+
+
+{-| The PR's changed files as the sidebar tree wants them — available as
+soon as the file list is known (while diffs are still computing), empty
+in every state where there's nothing to show a tree for.
+-}
+treeFilesOf : DiffsState -> List FileTree.TreeFile
+treeFilesOf diffs =
+    case diffs of
+        DiffsNotStarted ->
+            []
+
+        FetchingPRFiles ->
+            []
+
+        ComputingDiffsInBrowser files ->
+            List.map (\file -> { path = file.filename, status = file.status }) files
+
+        DiffsReady fileDiffs ->
+            List.map (\fileDiff -> { path = fileDiff.filename, status = fileDiff.status }) fileDiffs
+
+        DiffsFetchFailed _ ->
+            []
 
 
 viewDiffs : Set.Set String -> DiffsState -> Html FrontendMsg
@@ -941,7 +1012,7 @@ viewDiffs expandedSet diffs =
 
 viewFileDiff : Set.Set String -> FileDiff -> Html FrontendMsg
 viewFileDiff expandedSet fileDiff =
-    div [ Attr.class "diff-file" ]
+    div [ Attr.class "diff-file", Attr.id (fileDomId fileDiff.filename) ]
         [ div [ Attr.class "diff-file-header" ]
             [ span [ Attr.class "diff-filename" ] [ text fileDiff.filename ]
             , case fileDiff.outcome of
@@ -1530,6 +1601,35 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .syn-normal { color: #c9d1d9; }
 .syn-tree-sitter-error { text-decoration: wavy underline #f85149; }
 .ws { color: #3b4048; }
+.pr-layout { display: flex; gap: 16px; align-items: flex-start; }
+.pr-sidebar { width: 280px; flex-shrink: 0; position: sticky; top: 8px; max-height: calc(100vh - 16px); overflow-y: auto; }
+.pr-main { flex: 1; min-width: 0; }
+.file-tree-filter { width: 100%; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; color: #c9d1d9; padding: 6px 8px; margin-bottom: 8px; font-size: 13px; font-family: inherit; }
+.file-tree-filter:focus { outline: none; border-color: #58a6ff; }
+.file-tree-empty { color: #8b949e; font-size: 13px; padding: 8px 6px; }
+.tree-dir { display: flex; align-items: center; gap: 4px; color: #8b949e; font-size: 13px; padding-top: 3px; padding-bottom: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tree-dir-icon { color: #484f58; font-size: 10px; }
+.tree-file { display: flex; align-items: center; gap: 6px; width: 100%; text-align: left; padding-top: 3px; padding-bottom: 3px; padding-right: 6px; border-radius: 4px; font-size: 13px; color: #c9d1d9; white-space: nowrap; overflow: hidden; }
+.tree-file:hover { background: #161b22; }
+.tree-file-name { overflow: hidden; text-overflow: ellipsis; }
+.tree-status { width: 12px; flex-shrink: 0; text-align: center; font-weight: 700; }
+.tree-status-added { color: #3fb950; }
+.tree-status-modified { color: #d29922; }
+.tree-status-removed { color: #f85149; }
+.tree-status-renamed { color: #a37ade; }
+.tree-status-copied { color: #a37ade; }
+.tree-ext { flex-shrink: 0; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 10px; line-height: 14px; border: 1px solid #30363d; border-radius: 4px; padding: 0 4px; color: #8b949e; }
+.tree-ext-elm { color: #60b5cc; border-color: #60b5cc55; }
+.tree-ext-js, .tree-ext-mjs, .tree-ext-cjs { color: #f1e05a; border-color: #f1e05a55; }
+.tree-ext-ts, .tree-ext-tsx { color: #6cb6ff; border-color: #6cb6ff55; }
+.tree-ext-json { color: #d29922; border-color: #d2992255; }
+.tree-ext-md { color: #79c0ff; border-color: #79c0ff55; }
+.tree-ext-css, .tree-ext-scss { color: #c586c0; border-color: #c586c055; }
+.tree-ext-html { color: #e34c26; border-color: #e34c2655; }
+.tree-ext-rs { color: #dea584; border-color: #dea58455; }
+.tree-ext-py { color: #7fb3d5; border-color: #7fb3d555; }
+.tree-ext-sh, .tree-ext-bash { color: #8ec07c; border-color: #8ec07c55; }
+.tree-ext-yml, .tree-ext-yaml { color: #cb7676; border-color: #cb767655; }
 .expand-row { text-align: center; background: #161b22; padding: 4px 0; border-top: 1px solid #21262d; border-bottom: 1px solid #21262d; }
 .btn-expand { color: #58a6ff; font-size: 12px; font-family: 'SF Mono', 'Fira Code', monospace; }
 .btn-expand:hover { text-decoration: underline; }

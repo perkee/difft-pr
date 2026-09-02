@@ -3,6 +3,7 @@ module UnitTests exposing (..)
 import Backend
 import Dict
 import Expect
+import FileTree
 import Frontend
 import Html
 import Json.Decode
@@ -346,6 +347,92 @@ suite =
                             , Query.has [ Selector.class "hunk-rhs" ]
                             , Query.hasNot [ Selector.class "hunk-single" ]
                             ]
+            ]
+        , describe "FileTree.build"
+            [ test "nests files under their directories, directories before files" <|
+                \_ ->
+                    FileTree.build
+                        [ { path = "README.md", status = GithubFileModified }
+                        , { path = "src/B.elm", status = GithubFileAdded }
+                        , { path = "src/A.elm", status = GithubFileModified }
+                        ]
+                        |> Expect.equal
+                            [ FileTree.Directory "src"
+                                [ FileTree.Leaf { path = "src/A.elm", status = GithubFileModified }
+                                , FileTree.Leaf { path = "src/B.elm", status = GithubFileAdded }
+                                ]
+                            , FileTree.Leaf { path = "README.md", status = GithubFileModified }
+                            ]
+            , test "compresses single-child directory chains into one node" <|
+                \_ ->
+                    FileTree.build [ { path = "src/elm/App.elm", status = GithubFileModified } ]
+                        |> Expect.equal
+                            [ FileTree.Directory "src/elm"
+                                [ FileTree.Leaf { path = "src/elm/App.elm", status = GithubFileModified } ]
+                            ]
+            , test "does not compress a directory that has its own files" <|
+                \_ ->
+                    FileTree.build
+                        [ { path = "src/elm/App.elm", status = GithubFileModified }
+                        , { path = "src/top.txt", status = GithubFileRemoved }
+                        ]
+                        |> Expect.equal
+                            [ FileTree.Directory "src"
+                                [ FileTree.Directory "elm"
+                                    [ FileTree.Leaf { path = "src/elm/App.elm", status = GithubFileModified } ]
+                                , FileTree.Leaf { path = "src/top.txt", status = GithubFileRemoved }
+                                ]
+                            ]
+            ]
+        , describe "FileTree.filter"
+            [ test "matches substrings case-insensitively against the full path" <|
+                \_ ->
+                    FileTree.filter "ELM"
+                        [ { path = "src/App.elm", status = GithubFileModified }
+                        , { path = "README.md", status = GithubFileModified }
+                        ]
+                        |> Expect.equal [ { path = "src/App.elm", status = GithubFileModified } ]
+            , test "a blank query keeps everything" <|
+                \_ ->
+                    FileTree.filter "  "
+                        [ { path = "a.txt", status = GithubFileAdded } ]
+                        |> Expect.equal [ { path = "a.txt", status = GithubFileAdded } ]
+            ]
+        , describe "FileTree.extensionOf"
+            [ test "takes the last extension, lowercased" <|
+                \_ ->
+                    FileTree.extensionOf "src/a.test.JS"
+                        |> Expect.equal "js"
+            , test "a file without a dot has no extension" <|
+                \_ ->
+                    FileTree.extensionOf "Makefile"
+                        |> Expect.equal ""
+            ]
+        , describe "FileTree.view"
+            [ test "renders a filter input and a status-classed button per file" <|
+                \_ ->
+                    FileTree.view
+                        { filterText = ""
+                        , onFilterChanged = always ()
+                        , onFileSelected = always ()
+                        }
+                        [ { path = "src/App.elm", status = GithubFileRenamed } ]
+                        |> Query.fromHtml
+                        |> Expect.all
+                            [ Query.has [ Selector.class "file-tree-filter" ]
+                            , Query.find [ Selector.class "tree-file" ]
+                                >> Query.has [ Selector.class "tree-status-renamed", Selector.text "App.elm" ]
+                            ]
+            , test "shows an empty state when the filter matches nothing" <|
+                \_ ->
+                    FileTree.view
+                        { filterText = "zzz"
+                        , onFilterChanged = always ()
+                        , onFileSelected = always ()
+                        }
+                        [ { path = "src/App.elm", status = GithubFileModified } ]
+                        |> Query.fromHtml
+                        |> Query.has [ Selector.class "file-tree-empty" ]
             ]
         , describe "session restore"
             [ test "a known session restores its user" <|
