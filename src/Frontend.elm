@@ -1617,7 +1617,7 @@ css =
     """
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0d1117; color: #c9d1d9; }
-.app { max-width: 1400px; margin: 0 auto; padding: 0 16px; }
+.app { padding: 0 16px; }
 .header { display: flex; justify-content: space-between; align-items: center; padding: 16px 0; border-bottom: 1px solid #30363d; }
 .header h1 { font-size: 20px; color: #58a6ff; }
 .user-info { display: flex; align-items: center; gap: 8px; }
