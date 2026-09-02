@@ -214,6 +214,7 @@ type FrontendMsg
     | GotDiffsFromWasm (Result String (List FileDiff))
     | CancelAuthentication
     | AuthAttemptTimedOut
+    | SendAuthenticateWithCode String
 
 
 type ToBackend

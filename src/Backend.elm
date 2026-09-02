@@ -1,6 +1,7 @@
 module Backend exposing (..)
 
 import Dict
+import Duration exposing (Duration)
 import Effect.Command as Command exposing (BackendOnly, Command)
 import Effect.Http
 import Effect.Lamdera exposing (ClientId, SessionId)
@@ -59,6 +60,17 @@ httpErrorToString err =
 
         Effect.Http.BadBody body ->
             "Bad body: " ++ body
+
+
+{-| Every outbound call to GitHub gets a bounded timeout. Without one, a
+connection that hangs at the TCP/TLS level (rather than failing outright)
+leaves its BackendMsg callback never firing — the frontend then has no
+signal beyond its own 20s `AuthAttemptTimedOut` fallback, and every other
+GitHub-backed action just stalls forever with no error to show.
+-}
+githubRequestTimeout : Maybe Duration
+githubRequestTimeout =
+    Just (Duration.seconds 10)
 
 
 expectJson : (Result String a -> msg) -> Decode.Decoder a -> Effect.Http.Expect msg
@@ -433,7 +445,7 @@ exchangeCodeForToken sessionIdStr clientIdStr code =
             expectJson
                 (GotAccessToken sessionIdStr clientIdStr)
                 (Decode.field "access_token" Decode.string)
-        , timeout = Nothing
+        , timeout = githubRequestTimeout
         , tracker = Nothing
         }
 
@@ -449,7 +461,7 @@ fetchGithubUser sessionIdStr clientIdStr token =
             expectJson
                 (GotGithubUser sessionIdStr clientIdStr token)
                 githubUserDecoder
-        , timeout = Nothing
+        , timeout = githubRequestTimeout
         , tracker = Nothing
         }
 
@@ -465,7 +477,7 @@ fetchRepos clientIdStr token =
             expectJson
                 (GotRepos clientIdStr)
                 (Decode.list githubRepoDecoder)
-        , timeout = Nothing
+        , timeout = githubRequestTimeout
         , tracker = Nothing
         }
 
@@ -481,7 +493,7 @@ fetchPullRequests clientIdStr token owner repo =
             expectJson
                 (GotPullRequests clientIdStr)
                 (Decode.list githubPRDecoder)
-        , timeout = Nothing
+        , timeout = githubRequestTimeout
         , tracker = Nothing
         }
 
@@ -494,7 +506,7 @@ fetchPRMeta ctx =
         , url = "https://api.github.com/repos/" ++ ctx.owner ++ "/" ++ ctx.repo ++ "/pulls/" ++ String.fromInt ctx.prNumber
         , body = Effect.Http.emptyBody
         , expect = expectJson (GotPRMeta ctx) prMetaDecoder
-        , timeout = Nothing
+        , timeout = githubRequestTimeout
         , tracker = Nothing
         }
 
@@ -514,7 +526,7 @@ fetchPRFileList ctx meta =
                 ++ "/files?per_page=100"
         , body = Effect.Http.emptyBody
         , expect = expectJson (GotPRFileList ctx meta) (Decode.list githubPRFileEntryDecoder)
-        , timeout = Nothing
+        , timeout = githubRequestTimeout
         , tracker = Nothing
         }
 
@@ -537,7 +549,7 @@ fetchFileContentCommands ctx meta entry =
                         ++ sha
                 , body = Effect.Http.emptyBody
                 , expect = expectRawContentOrEmpty (GotFileContent ctx.requestKey entry.filename side)
-                , timeout = Nothing
+                , timeout = githubRequestTimeout
                 , tracker = Nothing
                 }
     in

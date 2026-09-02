@@ -125,9 +125,9 @@ init url key =
               , error = Nothing
               }
             , Command.batch
-                [ Effect.Lamdera.sendToBackend (AuthenticateWithCode code)
-                , Nav.replaceUrl key "/"
+                [ Nav.replaceUrl key "/"
                 , authTimeoutCommand
+                , sendAuthenticateWithCodeCommand code
                 ]
             )
 
@@ -148,10 +148,27 @@ LoadingPage forever with no way out but a full server restart.
 Guarded on still being on LoadingPage when it fires (see `update`'s
 AuthAttemptTimedOut case), so a login that actually completes in time
 isn't disrupted by a late timeout.
+
 -}
 authTimeoutCommand : Command FrontendOnly ToBackend FrontendMsg
 authTimeoutCommand =
     Effect.Task.perform (\() -> AuthAttemptTimedOut) (Effect.Process.sleep (Duration.seconds 20))
+
+
+{-| `init` runs (and its commands fire) right when the page loads — before
+the Lamdera live-connection WebSocket has necessarily finished opening.
+Sending `AuthenticateWithCode` synchronously as part of `init` risks the
+message going out on a socket that isn't open yet and being silently
+lost, which is indistinguishable from the backend just never responding
+(it's the same failure this code exists to route around: see
+`authTimeoutCommand`'s doc comment). A short delay before the actual
+send gives the connection time to establish first.
+-}
+sendAuthenticateWithCodeCommand : String -> Command FrontendOnly ToBackend FrontendMsg
+sendAuthenticateWithCodeCommand code =
+    Effect.Task.perform
+        (\() -> SendAuthenticateWithCode code)
+        (Effect.Process.sleep (Duration.milliseconds 500))
 
 
 update : FrontendMsg -> Model -> ( Model, Command FrontendOnly ToBackend FrontendMsg )
@@ -309,6 +326,9 @@ update msg model =
 
                 _ ->
                     ( model, Command.none )
+
+        SendAuthenticateWithCode code ->
+            ( model, Effect.Lamdera.sendToBackend (AuthenticateWithCode code) )
 
 
 updateFromBackend : ToFrontend -> Model -> ( Model, Command FrontendOnly ToBackend FrontendMsg )
@@ -1133,7 +1153,7 @@ viewExpandButton filename gapIndex hiddenCount =
             [ onClick (ExpandContext filename gapIndex)
             , Attr.class "btn btn-expand"
             ]
-            [ text ("\u{2195} Show " ++ String.fromInt hiddenCount ++ " hidden lines") ]
+            [ text ("↕ Show " ++ String.fromInt hiddenCount ++ " hidden lines") ]
         ]
 
 
