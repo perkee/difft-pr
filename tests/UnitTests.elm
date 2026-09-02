@@ -89,6 +89,8 @@ suite =
                                         }
                                       ]
                                     ]
+                                , lhsSyntax = []
+                                , rhsSyntax = []
                                 }
                             )
             , test "decodes a difft result with an explicit empty chunks array" <|
@@ -104,6 +106,8 @@ suite =
                                 , language = "Text"
                                 , status = StatusUnchanged
                                 , chunks = []
+                                , lhsSyntax = []
+                                , rhsSyntax = []
                                 }
                             )
             , test "decodes a difft result with chunks omitted entirely (a created or deleted file)" <|
@@ -119,6 +123,25 @@ suite =
                                 , language = "Elm"
                                 , status = StatusCreated
                                 , chunks = []
+                                , lhsSyntax = []
+                                , rhsSyntax = []
+                                }
+                            )
+            , test "decodes a difft result carrying whole-file syntax maps" <|
+                \_ ->
+                    let
+                        json =
+                            """{"path":"a.elm","language":"Elm","status":"changed","chunks":[],"lhs_syntax":[{"line":0,"start":0,"end":6,"highlight":"keyword"}],"rhs_syntax":[{"line":2,"start":4,"end":11,"highlight":"string"}]}"""
+                    in
+                    Json.Decode.decodeString Frontend.difftResultDecoder json
+                        |> Expect.equal
+                            (Ok
+                                { filename = "a.elm"
+                                , language = "Elm"
+                                , status = StatusChanged
+                                , chunks = []
+                                , lhsSyntax = [ { line = 0, start = 0, end = 6, highlight = HighlightKeyword } ]
+                                , rhsSyntax = [ { line = 2, start = 4, end = 11, highlight = HighlightString } ]
                                 }
                             )
             , test "wasmResponseDecoder decodes a successful batch" <|
@@ -141,6 +164,8 @@ suite =
                                                 , language = "Text"
                                                 , status = StatusChanged
                                                 , chunks = []
+                                                , lhsSyntax = []
+                                                , rhsSyntax = []
                                                 }
                                       }
                                     ]
@@ -254,7 +279,7 @@ suite =
                             }
 
                         addedResult =
-                            { filename = "new.txt", language = "Text", status = StatusCreated, chunks = [] }
+                            { filename = "new.txt", language = "Text", status = StatusCreated, chunks = [], lhsSyntax = [], rhsSyntax = [] }
                     in
                     Frontend.viewDiffBody Set.empty fileDiff addedResult
                         |> Query.fromHtml
@@ -278,7 +303,7 @@ suite =
                             }
 
                         deletedResult =
-                            { filename = "old.txt", language = "Text", status = StatusDeleted, chunks = [] }
+                            { filename = "old.txt", language = "Text", status = StatusDeleted, chunks = [], lhsSyntax = [], rhsSyntax = [] }
                     in
                     Frontend.viewDiffBody Set.empty fileDiff deletedResult
                         |> Query.fromHtml
@@ -310,6 +335,8 @@ suite =
                                     }
                                   ]
                                 ]
+                            , lhsSyntax = []
+                            , rhsSyntax = []
                             }
                     in
                     Frontend.viewDiffBody Set.empty fileDiff modifiedResult
@@ -320,14 +347,40 @@ suite =
                             , Query.hasNot [ Selector.class "hunk-single" ]
                             ]
             ]
-        , describe "viewLineWithChanges"
+        , describe "lineSegments"
+            [ test "no spans at all yields one plain segment" <|
+                \_ ->
+                    Frontend.lineSegments [] [] "plain text"
+                        |> Expect.equal
+                            [ { text = "plain text", syntax = Nothing, changed = False } ]
+            , test "a syntax span in the middle splits the line into three segments" <|
+                \_ ->
+                    Frontend.lineSegments
+                        [ { line = 0, start = 4, end = 8, highlight = HighlightKeyword } ]
+                        []
+                        "let case of"
+                        |> Expect.equal
+                            [ { text = "let ", syntax = Nothing, changed = False }
+                            , { text = "case", syntax = Just HighlightKeyword, changed = False }
+                            , { text = " of", syntax = Nothing, changed = False }
+                            ]
+            , test "a change inside a syntax span carries both the syntax and the changed flag" <|
+                \_ ->
+                    -- The tw-ml-auto → tw-ms-auto scenario: the whole literal is
+                    -- string-highlighted, only "ml" changed within it.
+                    Frontend.lineSegments
+                        [ { line = 0, start = 0, end = 11, highlight = HighlightString } ]
+                        [ { start = 3, end = 5, content = "ml", highlight = HighlightNormal } ]
+                        "tw-ml-auto\""
+                        |> Expect.equal
+                            [ { text = "tw-", syntax = Just HighlightString, changed = False }
+                            , { text = "ml", syntax = Just HighlightString, changed = True }
+                            , { text = "-auto\"", syntax = Just HighlightString, changed = False }
+                            ]
+            ]
+        , describe "viewHighlightedLine"
             [ test "renders the unchanged text around a change, not just the changed span" <|
                 \_ ->
-                    -- Reproduces the bug reported against a real PR diff: a line like
-                    -- `Semantic.triggerChevron [ class "tw-ml-auto" ] []` was rendering
-                    -- as literally just "ml", because difftastic's `changes` array only
-                    -- lists the differing span (start/end column offsets), not the whole
-                    -- line — the caller is expected to splice it back into the full line.
                     let
                         fullLine =
                             "            , Semantic.triggerChevron [ class \"tw-ml-auto\" ] []"
@@ -335,27 +388,63 @@ suite =
                         change =
                             { start = 50, end = 52, content = "ml", highlight = HighlightNormal }
                     in
-                    Html.div [] (Frontend.viewLineWithChanges "removed" fullLine [ change ])
+                    Html.div [] (Frontend.viewHighlightedLine Frontend.SideRemoved [] [ change ] fullLine)
                         |> Query.fromHtml
                         |> Query.has
                             [ Selector.text "Semantic.triggerChevron"
                             , Selector.text "tw-"
                             , Selector.text "-auto\""
                             ]
-            , test "the changed span is still wrapped in a highlighted diff-change element" <|
+            , test "the changed span is wrapped in a diff-change element" <|
                 \_ ->
                     let
                         change =
                             { start = 7, end = 9, content = "ml", highlight = HighlightNormal }
                     in
-                    Html.div [] (Frontend.viewLineWithChanges "removed" "before ml after" [ change ])
+                    Html.div [] (Frontend.viewHighlightedLine Frontend.SideRemoved [] [ change ] "before ml after")
                         |> Query.fromHtml
                         |> Query.find [ Selector.class "diff-change-removed" ]
                         |> Query.has [ Selector.text "ml" ]
-            , test "a line with no changes renders as plain unhighlighted text" <|
+            , test "a line with no changes renders with no diff-change element" <|
                 \_ ->
-                    Html.div [] (Frontend.viewLineWithChanges "removed" "unchanged line" [])
+                    Html.div [] (Frontend.viewHighlightedLine Frontend.SideRemoved [] [] "unchanged line")
                         |> Query.fromHtml
                         |> Query.hasNot [ Selector.class "diff-change" ]
+            , test "syntax spans render as syn-* colored elements" <|
+                \_ ->
+                    Html.div []
+                        (Frontend.viewHighlightedLine Frontend.SideAdded
+                            [ { line = 0, start = 0, end = 6, highlight = HighlightKeyword } ]
+                            []
+                            "module A"
+                        )
+                        |> Query.fromHtml
+                        |> Query.find [ Selector.class "syn-keyword" ]
+                        |> Query.has [ Selector.text "module" ]
+            , test "changes covering the whole line get no vivid marking (the line tint suffices)" <|
+                \_ ->
+                    Html.div []
+                        (Frontend.viewHighlightedLine Frontend.SideAdded
+                            []
+                            [ { start = 0, end = 5, content = "whole", highlight = HighlightNormal }
+                            , { start = 6, end = 10, content = "line", highlight = HighlightNormal }
+                            ]
+                            "whole line"
+                        )
+                        |> Query.fromHtml
+                        |> Query.hasNot [ Selector.class "diff-change" ]
+            , test "changed spans separated only by whitespace merge into one vivid run" <|
+                \_ ->
+                    Html.div []
+                        (Frontend.viewHighlightedLine Frontend.SideAdded
+                            []
+                            [ { start = 5, end = 7, content = "aa", highlight = HighlightNormal }
+                            , { start = 8, end = 10, content = "bb", highlight = HighlightNormal }
+                            ]
+                            "left aa bb right"
+                        )
+                        |> Query.fromHtml
+                        |> Query.findAll [ Selector.class "diff-change" ]
+                        |> Query.count (Expect.equal 1)
             ]
         ]

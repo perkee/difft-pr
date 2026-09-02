@@ -2,6 +2,7 @@ port module Frontend exposing (..)
 
 import Array exposing (Array)
 import Browser
+import Dict exposing (Dict)
 import Duration
 import Effect.Browser.Navigation as Nav
 import Effect.Command as Command exposing (Command, FrontendOnly)
@@ -477,11 +478,22 @@ diffOutcomeDecoder =
 
 difftResultDecoder : Decode.Decoder DifftResult
 difftResultDecoder =
-    Decode.map4 DifftResult
+    Decode.map6 DifftResult
         (Decode.field "path" Decode.string)
         (Decode.field "language" Decode.string)
         (Decode.field "status" diffStatusDecoder)
         (optionalListField "chunks" (Decode.list diffHunkDecoder))
+        (optionalListField "lhs_syntax" syntaxSpanDecoder)
+        (optionalListField "rhs_syntax" syntaxSpanDecoder)
+
+
+syntaxSpanDecoder : Decode.Decoder SyntaxSpan
+syntaxSpanDecoder =
+    Decode.map4 SyntaxSpan
+        (Decode.field "line" Decode.int)
+        (Decode.field "start" Decode.int)
+        (Decode.field "end" Decode.int)
+        (Decode.field "highlight" highlightDecoder)
 
 
 {-| difftastic's own JSON serializer omits `chunks` (and `aligned_lines`)
@@ -942,10 +954,10 @@ viewDiffBody expandedSet fileDiff result =
     if List.isEmpty result.chunks then
         case result.status of
             StatusCreated ->
-                viewWholeFile WholeFileAdded fileDiff.rhsContent
+                viewWholeFile SideAdded result.rhsSyntax fileDiff.rhsContent
 
             StatusDeleted ->
-                viewWholeFile WholeFileRemoved fileDiff.lhsContent
+                viewWholeFile SideRemoved result.lhsSyntax fileDiff.lhsContent
 
             StatusChanged ->
                 text ""
@@ -955,45 +967,80 @@ viewDiffBody expandedSet fileDiff result =
 
     else
         let
-            lhsLines =
-                Array.fromList (String.split "\n" fileDiff.lhsContent)
+            lhsContext =
+                makeSideContext fileDiff.lhsContent result.lhsSyntax
 
-            rhsLines =
-                Array.fromList (String.split "\n" fileDiff.rhsContent)
+            rhsContext =
+                makeSideContext fileDiff.rhsContent result.rhsSyntax
 
             ranges =
                 List.map chunkGroupRange result.chunks
 
             totalRhsLines =
-                Array.length rhsLines
+                Array.length rhsContext.lines
 
             sections =
                 buildSections fileDiff.filename totalRhsLines result.chunks ranges
         in
         div [ Attr.class "diff-chunks" ]
-            (List.map (viewSection lhsLines rhsLines expandedSet) sections)
+            (List.map (viewSection lhsContext rhsContext expandedSet) sections)
 
 
-{-| Which single side a whole-file (created or deleted) diff consists
-of. There is no "both sides" case here on purpose — a created file has
-no left side and a deleted file has no right side, so this type can't
-express the empty-column layouts this view exists to avoid.
+{-| Everything needed to render one side (left or right) of a file's
+diff: its lines, and its syntax spans grouped by line for O(log n)
+per-line lookup.
 -}
-type WholeFileSide
-    = WholeFileAdded
-    | WholeFileRemoved
+type alias SideContext =
+    { lines : Array String
+    , syntaxByLine : Dict Int (List SyntaxSpan)
+    }
 
 
-viewWholeFile : WholeFileSide -> String -> Html msg
-viewWholeFile side content =
+makeSideContext : String -> List SyntaxSpan -> SideContext
+makeSideContext content syntaxSpans =
+    { lines = Array.fromList (String.split "\n" content)
+    , syntaxByLine = groupSyntaxByLine syntaxSpans
+    }
+
+
+groupSyntaxByLine : List SyntaxSpan -> Dict Int (List SyntaxSpan)
+groupSyntaxByLine spans =
+    List.foldr
+        (\span_ acc ->
+            Dict.update span_.line
+                (\existing -> Just (span_ :: Maybe.withDefault [] existing))
+                acc
+        )
+        Dict.empty
+        spans
+
+
+syntaxForLine : Int -> SideContext -> List SyntaxSpan
+syntaxForLine lineNumber context =
+    Dict.get lineNumber context.syntaxByLine
+        |> Maybe.withDefault []
+
+
+{-| Render a created or deleted file as a single full-width column.
+There is no "both sides" layout here on purpose — a created file has no
+left side and a deleted file has no right side, so an empty opposite
+column isn't representable. The faint whole-column added/removed tint
+carries the diff meaning; no vivid changed-span marking, since every
+line changed (same as `changesCoverLine` lines in a regular diff).
+-}
+viewWholeFile : ChangeSide -> List SyntaxSpan -> String -> Html msg
+viewWholeFile side syntaxSpans content =
     let
-        ( changeClass, sideClass ) =
-            case side of
-                WholeFileAdded ->
-                    ( "added", "hunk-rhs" )
+        syntaxByLine =
+            groupSyntaxByLine syntaxSpans
 
-                WholeFileRemoved ->
-                    ( "removed", "hunk-lhs" )
+        sideClass =
+            case side of
+                SideAdded ->
+                    "hunk-rhs"
+
+                SideRemoved ->
+                    "hunk-lhs"
     in
     div [ Attr.class "diff-chunks" ]
         [ div [ Attr.class "chunk-group" ]
@@ -1005,17 +1052,16 @@ viewWholeFile side content =
                                 [ span [ Attr.class "line-number" ]
                                     [ text (String.fromInt (i + 1)) ]
                                 , span [ Attr.class "line-content" ]
-                                    (viewLineWithChanges changeClass line [ wholeLineChange line ])
+                                    (viewHighlightedLine side
+                                        (Dict.get i syntaxByLine |> Maybe.withDefault [])
+                                        []
+                                        line
+                                    )
                                 ]
                             ]
                     )
             )
         ]
-
-
-wholeLineChange : String -> DiffChange
-wholeLineChange line =
-    { start = 0, end = String.length line, content = line, highlight = HighlightNormal }
 
 
 type DiffSection
@@ -1069,19 +1115,19 @@ buildSections filename totalRhsLines chunks ranges =
     go 0 0 0 chunks ranges []
 
 
-viewSection : Array String -> Array String -> Set.Set String -> DiffSection -> Html FrontendMsg
-viewSection lhsLines rhsLines expandedSet section =
+viewSection : SideContext -> SideContext -> Set.Set String -> DiffSection -> Html FrontendMsg
+viewSection lhsContext rhsContext expandedSet section =
     case section of
         GapSection gap ->
-            viewGapSection lhsLines rhsLines expandedSet gap
+            viewGapSection lhsContext rhsContext expandedSet gap
 
         ChunkSection hunks ->
             div [ Attr.class "chunk-group" ]
-                (List.map (viewHunk lhsLines rhsLines) hunks)
+                (List.map (viewHunk lhsContext rhsContext) hunks)
 
 
-viewGapSection : Array String -> Array String -> Set.Set String -> GapInfo -> Html FrontendMsg
-viewGapSection lhsLines rhsLines expandedSet gap =
+viewGapSection : SideContext -> SideContext -> Set.Set String -> GapInfo -> Html FrontendMsg
+viewGapSection lhsContext rhsContext expandedSet gap =
     let
         rhsGapSize =
             gap.rhsEnd - gap.rhsStart + 1
@@ -1101,13 +1147,7 @@ viewGapSection lhsLines rhsLines expandedSet gap =
     else if gapSize <= 2 * contextSize || isExpanded then
         div [ Attr.class "context-lines" ]
             (List.map
-                (\i ->
-                    viewContextLine
-                        (gap.lhsStart + i)
-                        (Array.get (gap.lhsStart + i) lhsLines |> Maybe.withDefault "")
-                        (gap.rhsStart + i)
-                        (Array.get (gap.rhsStart + i) rhsLines |> Maybe.withDefault "")
-                )
+                (\i -> viewContextLine lhsContext (gap.lhsStart + i) rhsContext (gap.rhsStart + i))
                 (List.range 0 (gapSize - 1))
             )
 
@@ -1118,13 +1158,7 @@ viewGapSection lhsLines rhsLines expandedSet gap =
         in
         div [ Attr.class "context-lines" ]
             (List.map
-                (\i ->
-                    viewContextLine
-                        (gap.lhsStart + i)
-                        (Array.get (gap.lhsStart + i) lhsLines |> Maybe.withDefault "")
-                        (gap.rhsStart + i)
-                        (Array.get (gap.rhsStart + i) rhsLines |> Maybe.withDefault "")
-                )
+                (\i -> viewContextLine lhsContext (gap.lhsStart + i) rhsContext (gap.rhsStart + i))
                 (List.range 0 (contextSize - 1))
                 ++ [ viewExpandButton gap.filename gap.gapIndex hiddenCount ]
                 ++ List.map
@@ -1133,26 +1167,32 @@ viewGapSection lhsLines rhsLines expandedSet gap =
                             offset =
                                 gapSize - contextSize + i
                         in
-                        viewContextLine
-                            (gap.lhsStart + offset)
-                            (Array.get (gap.lhsStart + offset) lhsLines |> Maybe.withDefault "")
-                            (gap.rhsStart + offset)
-                            (Array.get (gap.rhsStart + offset) rhsLines |> Maybe.withDefault "")
+                        viewContextLine lhsContext (gap.lhsStart + offset) rhsContext (gap.rhsStart + offset)
                     )
                     (List.range 0 (contextSize - 1))
             )
 
 
-viewContextLine : Int -> String -> Int -> String -> Html msg
-viewContextLine lhsLineNum lhsContent rhsLineNum rhsContent =
+viewContextLine : SideContext -> Int -> SideContext -> Int -> Html msg
+viewContextLine lhsContext lhsLineNum rhsContext rhsLineNum =
     div [ Attr.class "hunk context-line" ]
         [ div [ Attr.class "hunk-side" ]
             [ span [ Attr.class "line-number" ] [ text (String.fromInt (lhsLineNum + 1)) ]
-            , span [ Attr.class "line-content" ] (renderWithWhitespace lhsContent)
+            , span [ Attr.class "line-content" ]
+                (viewHighlightedLine SideRemoved
+                    (syntaxForLine lhsLineNum lhsContext)
+                    []
+                    (lineAt lhsLineNum lhsContext.lines)
+                )
             ]
         , div [ Attr.class "hunk-side" ]
             [ span [ Attr.class "line-number" ] [ text (String.fromInt (rhsLineNum + 1)) ]
-            , span [ Attr.class "line-content" ] (renderWithWhitespace rhsContent)
+            , span [ Attr.class "line-content" ]
+                (viewHighlightedLine SideAdded
+                    (syntaxForLine rhsLineNum rhsContext)
+                    []
+                    (lineAt rhsLineNum rhsContext.lines)
+                )
             ]
         ]
 
@@ -1168,38 +1208,34 @@ viewExpandButton filename gapIndex hiddenCount =
         ]
 
 
-viewHunk : Array String -> Array String -> DiffHunk -> Html msg
-viewHunk lhsLines rhsLines hunk =
+viewHunk : SideContext -> SideContext -> DiffHunk -> Html msg
+viewHunk lhsContext rhsContext hunk =
     div [ Attr.class "hunk" ]
         [ div [ Attr.class "hunk-side hunk-lhs" ]
-            (case hunk.lhs of
-                Just side ->
-                    [ span [ Attr.class "line-number" ]
-                        [ text (String.fromInt (side.lineNumber + 1)) ]
-                    , span [ Attr.class "line-content" ]
-                        (viewLineWithChanges "removed" (lineAt side.lineNumber lhsLines) side.changes)
-                    ]
-
-                Nothing ->
-                    [ span [ Attr.class "line-number" ] []
-                    , span [ Attr.class "line-content" ] []
-                    ]
-            )
+            (viewHunkSide SideRemoved lhsContext hunk.lhs)
         , div [ Attr.class "hunk-side hunk-rhs" ]
-            (case hunk.rhs of
-                Just side ->
-                    [ span [ Attr.class "line-number" ]
-                        [ text (String.fromInt (side.lineNumber + 1)) ]
-                    , span [ Attr.class "line-content" ]
-                        (viewLineWithChanges "added" (lineAt side.lineNumber rhsLines) side.changes)
-                    ]
-
-                Nothing ->
-                    [ span [ Attr.class "line-number" ] []
-                    , span [ Attr.class "line-content" ] []
-                    ]
-            )
+            (viewHunkSide SideAdded rhsContext hunk.rhs)
         ]
+
+
+viewHunkSide : ChangeSide -> SideContext -> Maybe DiffSide -> List (Html msg)
+viewHunkSide changeSide context maybeSide =
+    case maybeSide of
+        Just side ->
+            [ span [ Attr.class "line-number" ]
+                [ text (String.fromInt (side.lineNumber + 1)) ]
+            , span [ Attr.class "line-content" ]
+                (viewHighlightedLine changeSide
+                    (syntaxForLine side.lineNumber context)
+                    side.changes
+                    (lineAt side.lineNumber context.lines)
+                )
+            ]
+
+        Nothing ->
+            [ span [ Attr.class "line-number" ] []
+            , span [ Attr.class "line-content" ] []
+            ]
 
 
 lineAt : Int -> Array String -> String
@@ -1207,37 +1243,163 @@ lineAt lineNumber lines =
     Array.get lineNumber lines |> Maybe.withDefault ""
 
 
-{-| difftastic's `changes` only lists the spans that actually differ
-within a line (as `start`/`end` column offsets), not the whole line —
-rendering just those, as if they were the entire line's content, is why
-an unchanged line like `Semantic.triggerChevron [ class "tw-ml-auto" ]
-[]` was showing up as literally just "ml". This splices each
-highlighted change back into its correct position within `fullLine`,
-rendering the untouched text on either side as plain content.
+{-| Whether a line (or a changed span within it) belongs to the removed
+(left) or added (right) side of the diff — decides which background tint
+changed text gets.
 -}
-viewLineWithChanges : String -> String -> List DiffChange -> List (Html msg)
-viewLineWithChanges side fullLine changes =
+type ChangeSide
+    = SideRemoved
+    | SideAdded
+
+
+changeSideClass : ChangeSide -> String
+changeSideClass side =
+    case side of
+        SideRemoved ->
+            "removed"
+
+        SideAdded ->
+            "added"
+
+
+{-| One run of characters within a rendered line: its text, its syntax
+classification (`Nothing` renders in the default text color), and
+whether it's part of a changed span (which adds the vivid diff
+background — the text color always comes from syntax, GitHub-style).
+-}
+type alias LineSegment =
+    { text : String
+    , syntax : Maybe Highlight
+    , changed : Bool
+    }
+
+
+{-| Split a line into segments at every syntax-span and change-span
+boundary, so each segment has exactly one syntax classification and one
+changed/unchanged state. difftastic's `changes` only lists the spans
+that differ (as `start`/`end` column offsets), and its syntax maps only
+list non-Normal tokens — text covered by neither renders plain.
+-}
+lineSegments : List SyntaxSpan -> List DiffChange -> String -> List LineSegment
+lineSegments syntaxSpans changes fullLine =
     let
-        go : Int -> List DiffChange -> List (Html msg) -> List (Html msg)
-        go pos remaining acc =
-            case remaining of
-                [] ->
-                    acc ++ renderWithWhitespace (String.slice pos (String.length fullLine) fullLine)
+        len =
+            String.length fullLine
 
-                change :: rest ->
-                    let
-                        unchangedBefore =
-                            renderWithWhitespace (String.slice pos change.start fullLine)
+        clampCol : Int -> Int
+        clampCol col =
+            clamp 0 len col
 
-                        highlighted =
-                            [ span
-                                [ Attr.class ("diff-change diff-change-" ++ side ++ " highlight-" ++ highlightClass change.highlight) ]
-                                (renderWithWhitespace change.content)
-                            ]
-                    in
-                    go change.end rest (acc ++ unchangedBefore ++ highlighted)
+        boundaries =
+            (List.concatMap (\s -> [ clampCol s.start, clampCol s.end ]) syntaxSpans
+                ++ List.concatMap (\c -> [ clampCol c.start, clampCol c.end ]) changes
+                ++ [ 0, len ]
+            )
+                |> Set.fromList
+                |> Set.toList
+
+        segmentAt : Int -> Int -> LineSegment
+        segmentAt from to =
+            { text = String.slice from to fullLine
+            , syntax =
+                syntaxSpans
+                    |> List.filter (\s -> s.start <= from && from < s.end)
+                    |> List.head
+                    |> Maybe.map .highlight
+            , changed = List.any (\c -> c.start <= from && from < c.end) changes
+            }
     in
-    go 0 (List.sortBy .start changes) []
+    List.map2 segmentAt boundaries (List.drop 1 boundaries)
+        |> List.filter (\segment -> not (String.isEmpty segment.text))
+
+
+{-| Merge changed spans separated only by whitespace into one contiguous
+span, so a run of changed tokens reads as a single vivid region instead
+of a patchy one (difftastic reports novel tokens individually, and the
+whitespace between them belongs to no token).
+-}
+mergeChangesAcrossWhitespace : String -> List DiffChange -> List DiffChange
+mergeChangesAcrossWhitespace fullLine changes =
+    let
+        merge : DiffChange -> List DiffChange -> List DiffChange
+        merge change merged =
+            case merged of
+                previous :: rest ->
+                    if String.all isWhitespace (String.slice previous.end change.start fullLine) then
+                        { previous | end = change.end } :: rest
+
+                    else
+                        change :: merged
+
+                [] ->
+                    [ change ]
+    in
+    changes
+        |> List.sortBy .start
+        |> List.foldl merge []
+        |> List.reverse
+
+
+{-| True when the changed spans cover every non-whitespace character of
+the line — i.e. the whole line is new/gone, not edited within. Such
+lines skip the vivid changed-span background: the faint whole-line tint
+already says it, and painting everything vivid would drown the syntax
+colors (GitHub does the same — only intra-line word changes get the
+vivid mark).
+-}
+changesCoverLine : String -> List DiffChange -> Bool
+changesCoverLine fullLine changes =
+    String.toList fullLine
+        |> List.indexedMap Tuple.pair
+        |> List.all
+            (\( i, char ) ->
+                isWhitespace char
+                    || List.any (\c -> c.start <= i && i < c.end) changes
+            )
+
+
+{-| Render one line of a diff: syntax highlighting as text color across
+the whole line, and the vivid changed-span background behind the parts
+that differ.
+-}
+viewHighlightedLine : ChangeSide -> List SyntaxSpan -> List DiffChange -> String -> List (Html msg)
+viewHighlightedLine side syntaxSpans changes fullLine =
+    let
+        mergedChanges =
+            mergeChangesAcrossWhitespace fullLine changes
+
+        visibleChanges =
+            if changesCoverLine fullLine mergedChanges then
+                []
+
+            else
+                mergedChanges
+    in
+    lineSegments syntaxSpans visibleChanges fullLine
+        |> List.concatMap (viewSegment side)
+
+
+viewSegment : ChangeSide -> LineSegment -> List (Html msg)
+viewSegment side segment =
+    let
+        classes =
+            List.filterMap identity
+                [ if segment.changed then
+                    Just ("diff-change diff-change-" ++ changeSideClass side)
+
+                  else
+                    Nothing
+                , Maybe.map (\highlight -> "syn-" ++ highlightClass highlight) segment.syntax
+                ]
+    in
+    case classes of
+        [] ->
+            renderWithWhitespace segment.text
+
+        _ ->
+            [ span [ Attr.class (String.join " " classes) ]
+                (renderWithWhitespace segment.text)
+            ]
 
 
 highlightClass : Highlight -> String
@@ -1317,12 +1479,16 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .context-line .hunk-side:first-child { border-right: 1px solid #30363d; }
 .line-number { color: #484f58; min-width: 48px; text-align: right; padding-right: 12px; user-select: none; flex-shrink: 0; }
 .line-content { white-space: pre; tab-size: 4; flex: 1; min-width: 0; }
-.diff-change-removed { background: #67060c80; color: #ffa198; }
-.diff-change-added { background: #03501580; color: #7ee787; }
-.highlight-string { font-style: italic; }
-.highlight-keyword { font-weight: bold; }
-.highlight-comment { opacity: 0.75; }
-.highlight-tree-sitter-error { text-decoration: wavy underline #f85149; }
+.diff-change { border-radius: 2px; }
+.diff-change-removed { background: #8b1a1f99; }
+.diff-change-added { background: #1c6b2eb3; }
+.syn-keyword { color: #ff7b72; }
+.syn-string { color: #a5d6ff; }
+.syn-comment { color: #8b949e; }
+.syn-type { color: #ffa657; }
+.syn-delimiter { color: #79c0ff; }
+.syn-normal { color: #c9d1d9; }
+.syn-tree-sitter-error { text-decoration: wavy underline #f85149; }
 .ws { color: #3b4048; }
 .expand-row { text-align: center; background: #161b22; padding: 4px 0; border-top: 1px solid #21262d; border-bottom: 1px solid #21262d; }
 .btn-expand { color: #58a6ff; font-size: 12px; font-family: 'SF Mono', 'Fira Code', monospace; }

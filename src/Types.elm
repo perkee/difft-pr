@@ -139,6 +139,21 @@ type alias DiffChange =
     }
 
 
+{-| One syntax-classified token span, from difftastic's whole-file
+`lhs_syntax`/`rhs_syntax` maps. Unlike `DiffChange`, these cover the
+entire file (changed or not) so unchanged text can be syntax-colored
+too. Only non-Normal tokens are emitted; text not covered by any span
+renders in the default color. `line` is 0-based; `start`/`end` are
+column offsets.
+-}
+type alias SyntaxSpan =
+    { line : Int
+    , start : Int
+    , end : Int
+    , highlight : Highlight
+    }
+
+
 {-| One file's structural diff, decoded from the wasm module's JSON
 output (the same shape as `difft --display=json` for a single file).
 -}
@@ -147,6 +162,8 @@ type alias DifftResult =
     , language : String
     , status : DiffStatus
     , chunks : List (List DiffHunk)
+    , lhsSyntax : List SyntaxSpan
+    , rhsSyntax : List SyntaxSpan
     }
 
 
