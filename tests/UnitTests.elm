@@ -6,6 +6,7 @@ import Expect
 import Frontend
 import Html
 import Json.Decode
+import Set
 import Test exposing (Test, describe, test)
 import Test.Html.Query as Query
 import Test.Html.Selector as Selector
@@ -239,6 +240,85 @@ suite =
                         |> Backend.resolvedPRFiles
                         |> Expect.equal
                             [ { filename = "new.txt", status = GithubFileAdded, lhsContent = "", rhsContent = "hello" } ]
+            ]
+        , describe "viewDiffBody single-column rendering for created and deleted files"
+            [ test "an added file renders one full-width column with no left (lhs) side at all" <|
+                \_ ->
+                    let
+                        fileDiff =
+                            { filename = "new.txt"
+                            , status = GithubFileAdded
+                            , lhsContent = ""
+                            , rhsContent = "first line\nsecond line"
+                            , outcome = DiffComputed addedResult
+                            }
+
+                        addedResult =
+                            { filename = "new.txt", language = "Text", status = StatusCreated, chunks = [] }
+                    in
+                    Frontend.viewDiffBody Set.empty fileDiff addedResult
+                        |> Query.fromHtml
+                        |> Expect.all
+                            [ Query.hasNot [ Selector.class "hunk-lhs" ]
+                            , Query.has
+                                [ Selector.class "hunk-single"
+                                , Selector.text "first"
+                                , Selector.text "second"
+                                ]
+                            ]
+            , test "a deleted file renders one full-width column with no right (rhs) side at all" <|
+                \_ ->
+                    let
+                        fileDiff =
+                            { filename = "old.txt"
+                            , status = GithubFileRemoved
+                            , lhsContent = "goodbye line"
+                            , rhsContent = ""
+                            , outcome = DiffComputed deletedResult
+                            }
+
+                        deletedResult =
+                            { filename = "old.txt", language = "Text", status = StatusDeleted, chunks = [] }
+                    in
+                    Frontend.viewDiffBody Set.empty fileDiff deletedResult
+                        |> Query.fromHtml
+                        |> Expect.all
+                            [ Query.hasNot [ Selector.class "hunk-rhs" ]
+                            , Query.has
+                                [ Selector.class "hunk-single"
+                                , Selector.text "goodbye"
+                                ]
+                            ]
+            , test "a modified file still renders both columns" <|
+                \_ ->
+                    let
+                        fileDiff =
+                            { filename = "mod.txt"
+                            , status = GithubFileModified
+                            , lhsContent = "old"
+                            , rhsContent = "new"
+                            , outcome = DiffComputed modifiedResult
+                            }
+
+                        modifiedResult =
+                            { filename = "mod.txt"
+                            , language = "Text"
+                            , status = StatusChanged
+                            , chunks =
+                                [ [ { lhs = Just { lineNumber = 0, changes = [ { start = 0, end = 3, content = "old", highlight = HighlightNormal } ] }
+                                    , rhs = Just { lineNumber = 0, changes = [ { start = 0, end = 3, content = "new", highlight = HighlightNormal } ] }
+                                    }
+                                  ]
+                                ]
+                            }
+                    in
+                    Frontend.viewDiffBody Set.empty fileDiff modifiedResult
+                        |> Query.fromHtml
+                        |> Expect.all
+                            [ Query.has [ Selector.class "hunk-lhs" ]
+                            , Query.has [ Selector.class "hunk-rhs" ]
+                            , Query.hasNot [ Selector.class "hunk-single" ]
+                            ]
             ]
         , describe "viewLineWithChanges"
             [ test "renders the unchanged text around a change, not just the changed span" <|

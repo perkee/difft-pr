@@ -932,26 +932,20 @@ githubFileStatusLabel status =
 
 {-| difftastic emits no chunks at all for a created or deleted file (see
 `optionalListField`'s doc comment) — there's nothing to align against on
-the other side, so it leaves rendering the whole file to the caller. This
-builds that rendering by hand, as a single synthetic hunk per line, so it
-goes through the same `viewHunk`/highlighting path as a normal diff
-(same "whole line added"/"whole line removed" look, just for every line).
+the other side, so it leaves rendering the whole file to the caller.
+Since one side has no content by construction, these render as a single
+full-width column of the side that exists, rather than a two-column
+layout with one column permanently empty.
 -}
 viewDiffBody : Set.Set String -> FileDiff -> DifftResult -> Html FrontendMsg
 viewDiffBody expandedSet fileDiff result =
     if List.isEmpty result.chunks then
         case result.status of
             StatusCreated ->
-                div [ Attr.class "diff-chunks" ]
-                    [ div [ Attr.class "chunk-group" ]
-                        (List.map (viewHunk Array.empty Array.empty) (wholeFileAddedHunks fileDiff.rhsContent))
-                    ]
+                viewWholeFile WholeFileAdded fileDiff.rhsContent
 
             StatusDeleted ->
-                div [ Attr.class "diff-chunks" ]
-                    [ div [ Attr.class "chunk-group" ]
-                        (List.map (viewHunk Array.empty Array.empty) (wholeFileRemovedHunks fileDiff.lhsContent))
-                    ]
+                viewWholeFile WholeFileRemoved fileDiff.lhsContent
 
             StatusChanged ->
                 text ""
@@ -980,26 +974,43 @@ viewDiffBody expandedSet fileDiff result =
             (List.map (viewSection lhsLines rhsLines expandedSet) sections)
 
 
-wholeFileAddedHunks : String -> List DiffHunk
-wholeFileAddedHunks content =
-    String.split "\n" content
-        |> List.indexedMap
-            (\i line ->
-                { lhs = Nothing
-                , rhs = Just { lineNumber = i, changes = [ wholeLineChange line ] }
-                }
-            )
+{-| Which single side a whole-file (created or deleted) diff consists
+of. There is no "both sides" case here on purpose — a created file has
+no left side and a deleted file has no right side, so this type can't
+express the empty-column layouts this view exists to avoid.
+-}
+type WholeFileSide
+    = WholeFileAdded
+    | WholeFileRemoved
 
 
-wholeFileRemovedHunks : String -> List DiffHunk
-wholeFileRemovedHunks content =
-    String.split "\n" content
-        |> List.indexedMap
-            (\i line ->
-                { lhs = Just { lineNumber = i, changes = [ wholeLineChange line ] }
-                , rhs = Nothing
-                }
+viewWholeFile : WholeFileSide -> String -> Html msg
+viewWholeFile side content =
+    let
+        ( changeClass, sideClass ) =
+            case side of
+                WholeFileAdded ->
+                    ( "added", "hunk-rhs" )
+
+                WholeFileRemoved ->
+                    ( "removed", "hunk-lhs" )
+    in
+    div [ Attr.class "diff-chunks" ]
+        [ div [ Attr.class "chunk-group" ]
+            (String.split "\n" content
+                |> List.indexedMap
+                    (\i line ->
+                        div [ Attr.class "hunk hunk-single" ]
+                            [ div [ Attr.class ("hunk-side " ++ sideClass) ]
+                                [ span [ Attr.class "line-number" ]
+                                    [ text (String.fromInt (i + 1)) ]
+                                , span [ Attr.class "line-content" ]
+                                    (viewLineWithChanges changeClass line [ wholeLineChange line ])
+                                ]
+                            ]
+                    )
             )
+        ]
 
 
 wholeLineChange : String -> DiffChange
@@ -1301,6 +1312,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .hunk-side { flex: 1; display: flex; padding: 0 8px; min-width: 0; }
 .hunk-lhs { background: #1c1210; border-right: 1px solid #30363d; }
 .hunk-rhs { background: #0f1a10; }
+.hunk-single .hunk-lhs { border-right: none; }
 .context-line .hunk-side { background: #0d1117; }
 .context-line .hunk-side:first-child { border-right: 1px solid #30363d; }
 .line-number { color: #484f58; min-width: 48px; text-align: right; padding-right: 12px; user-select: none; flex-shrink: 0; }
