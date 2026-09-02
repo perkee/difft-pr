@@ -6,6 +6,7 @@ import Expect
 import FileTree
 import Frontend
 import Html
+import Html.Attributes as Attr
 import Json.Decode
 import Set
 import Test exposing (Test, describe, test)
@@ -451,6 +452,26 @@ suite =
                         |> Expect.all
                             [ Query.has [ Selector.class "tree-file" ]
                             , Query.hasNot [ Selector.class "file-tree-empty" ]
+                            ]
+            ]
+        , describe "viewDiffToolbar"
+            [ test "the wrap toggle reports its off state via aria-pressed" <|
+                \_ ->
+                    Frontend.viewDiffToolbar False
+                        |> Query.fromHtml
+                        |> Query.find [ Selector.tag "button" ]
+                        |> Expect.all
+                            [ Query.has [ Selector.attribute (Attr.attribute "aria-pressed" "false"), Selector.text "Wrap lines" ]
+                            , Query.hasNot [ Selector.class "btn-toggle-on" ]
+                            ]
+            , test "the wrap toggle reports its on state via aria-pressed and styling" <|
+                \_ ->
+                    Frontend.viewDiffToolbar True
+                        |> Query.fromHtml
+                        |> Query.find [ Selector.tag "button" ]
+                        |> Query.has
+                            [ Selector.attribute (Attr.attribute "aria-pressed" "true")
+                            , Selector.class "btn-toggle-on"
                             ]
             ]
         , describe "session restore"

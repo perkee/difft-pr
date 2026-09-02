@@ -84,6 +84,7 @@ emptyModel key url =
     , fileFilterInput = ""
     , fileFilter = ""
     , fileFilterDebounce = Debounce.init
+    , wrapLines = False
     , error = Nothing
     }
 
@@ -134,6 +135,7 @@ init url key =
               , fileFilterInput = ""
               , fileFilter = ""
               , fileFilterDebounce = Debounce.init
+              , wrapLines = False
               , error = Nothing
               }
             , Command.batch
@@ -348,6 +350,9 @@ update msg model =
 
         FileTreeFileClicked filename ->
             ( model, scrollToFile filename )
+
+        ToggleLineWrap ->
+            ( { model | wrapLines = not model.wrapLines }, Command.none )
 
         NoOpFrontendMsg ->
             ( model, Command.none )
@@ -1006,9 +1011,35 @@ viewPRDetail model =
                             }
                             treeFiles
                         ]
-                    , div [ Attr.class "pr-main" ]
-                        [ viewDiffs model.expandedContexts model.diffs ]
+                    , div
+                        [ Attr.classList
+                            [ ( "pr-main", True )
+                            , ( "wrap-lines", model.wrapLines )
+                            ]
+                        ]
+                        [ viewDiffToolbar model.wrapLines
+                        , viewDiffs model.expandedContexts model.diffs
+                        ]
                     ]
+        ]
+
+
+viewDiffToolbar : Bool -> Html FrontendMsg
+viewDiffToolbar wrapLines =
+    div [ Attr.class "diff-toolbar" ]
+        [ button
+            [ onClick ToggleLineWrap
+            , Attr.class "btn btn-small btn-toggle"
+            , Attr.classList [ ( "btn-toggle-on", wrapLines ) ]
+            , Attr.attribute "aria-pressed"
+                (if wrapLines then
+                    "true"
+
+                 else
+                    "false"
+                )
+            ]
+            [ text "Wrap lines" ]
         ]
 
 
@@ -1624,10 +1655,26 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .diff-status-removed { background: #f8514940; color: #f85149; }
 .diff-status-renamed { background: #a37ade40; color: #a37ade; }
 .diff-status-copied { background: #a37ade40; color: #a37ade; }
-.diff-chunks { overflow-x: auto; }
-.chunk-group { padding: 0; }
-.hunk { display: flex; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; line-height: 20px; }
-.hunk-side { flex: 1; display: flex; padding: 0 8px; min-width: 0; }
+/* The two diff columns are one shared grid: every row (hunk, context
+   line) subgrids into the same two max-content tracks, so each column is
+   as wide as its longest line, the column boundary stays aligned across
+   all rows, and the block gets ONE horizontal scrollbar that moves both
+   columns together — no line is ever cut off behind the other column.
+   The half-of-visible-width floor comes from min-width: 50cqw on the
+   cells (not minmax(50%, max-content) tracks: a minmax track only grows
+   into free space, of which a scroll container has none, so it would
+   stay clamped at the minimum). */
+.diff-chunks { overflow-x: auto; display: grid; grid-template-columns: max-content max-content; container-type: inline-size; }
+.chunk-group, .context-lines { grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; }
+.hunk { grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; line-height: 20px; }
+.hunk-side { display: flex; padding: 0 8px; min-width: 50cqw; }
+.hunk-single .hunk-side { grid-column: 1 / -1; min-width: 100cqw; }
+/* Line wrapping (toggled): columns pin to equal halves and long lines
+   wrap in place instead of growing the scrollable width. */
+.wrap-lines .diff-chunks { grid-template-columns: 1fr 1fr; }
+.wrap-lines .hunk-side { min-width: 0; }
+.wrap-lines .hunk-single .hunk-side { min-width: 0; }
+.wrap-lines .line-content { white-space: pre-wrap; overflow-wrap: anywhere; }
 .hunk-lhs { background: #1c1210; border-right: 1px solid #30363d; }
 .hunk-rhs { background: #0f1a10; }
 .hunk-single .hunk-lhs { border-right: none; }
@@ -1649,6 +1696,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .pr-layout { display: flex; gap: 16px; align-items: flex-start; }
 .pr-sidebar { width: 280px; flex-shrink: 0; position: sticky; top: 8px; max-height: calc(100vh - 16px); overflow-y: auto; }
 .pr-main { flex: 1; min-width: 0; }
+.diff-toolbar { display: flex; justify-content: flex-end; margin-bottom: 8px; }
+.btn-toggle-on { background: #1f6feb33; border-color: #58a6ff; color: #58a6ff; }
 .file-tree-filter { width: 100%; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; color: #c9d1d9; padding: 6px 8px; margin-bottom: 8px; font-size: 13px; font-family: inherit; }
 .file-tree-filter:focus { outline: none; border-color: #58a6ff; }
 .file-tree-empty { color: #8b949e; font-size: 13px; padding: 8px 6px; }
@@ -1675,8 +1724,10 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .tree-ext-py { color: #7fb3d5; border-color: #7fb3d555; }
 .tree-ext-sh, .tree-ext-bash { color: #8ec07c; border-color: #8ec07c55; }
 .tree-ext-yml, .tree-ext-yaml { color: #cb7676; border-color: #cb767655; }
-.expand-row { text-align: center; background: #161b22; padding: 4px 0; border-top: 1px solid #21262d; border-bottom: 1px solid #21262d; }
-.btn-expand { color: #58a6ff; font-size: 12px; font-family: 'SF Mono', 'Fira Code', monospace; }
+.expand-row { grid-column: 1 / -1; text-align: center; background: #161b22; padding: 4px 0; border-top: 1px solid #21262d; border-bottom: 1px solid #21262d; }
+/* The row spans the full scrollable width; keep its button pinned inside
+   the visible part while scrolled horizontally. */
+.btn-expand { color: #58a6ff; font-size: 12px; font-family: 'SF Mono', 'Fira Code', monospace; position: sticky; left: 16px; right: 16px; }
 .btn-expand:hover { text-decoration: underline; }
 h2 { margin-bottom: 16px; color: #f0f6fc; }
 """
