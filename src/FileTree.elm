@@ -191,7 +191,8 @@ extensionOf path =
 
 
 type alias Config msg =
-    { filterText : String
+    { inputText : String -- what the search box shows; follows every keystroke
+    , activeFilter : String -- the filter actually applied to the tree (the caller may debounce it behind inputText)
     , onFilterChanged : String -> msg
     , onFileSelected : String -> msg
     }
@@ -201,13 +202,13 @@ view : Config msg -> List TreeFile -> Html msg
 view config files =
     let
         visible =
-            filter config.filterText files
+            filter config.activeFilter files
     in
     div [ Attr.class "file-tree" ]
         [ input
             [ Attr.type_ "search"
             , Attr.placeholder "Filter files"
-            , Attr.value config.filterText
+            , Attr.value config.inputText
             , Html.Events.onInput config.onFilterChanged
             , Attr.class "file-tree-filter"
             ]

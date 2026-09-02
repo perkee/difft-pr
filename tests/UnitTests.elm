@@ -412,7 +412,8 @@ suite =
             [ test "renders a filter input and a status-classed button per file" <|
                 \_ ->
                     FileTree.view
-                        { filterText = ""
+                        { inputText = ""
+                        , activeFilter = ""
                         , onFilterChanged = always ()
                         , onFileSelected = always ()
                         }
@@ -426,13 +427,31 @@ suite =
             , test "shows an empty state when the filter matches nothing" <|
                 \_ ->
                     FileTree.view
-                        { filterText = "zzz"
+                        { inputText = "zzz"
+                        , activeFilter = "zzz"
                         , onFilterChanged = always ()
                         , onFileSelected = always ()
                         }
                         [ { path = "src/App.elm", status = GithubFileModified } ]
                         |> Query.fromHtml
                         |> Query.has [ Selector.class "file-tree-empty" ]
+            , test "filters by the settled activeFilter, not the still-debouncing input text" <|
+                \_ ->
+                    -- Mid-typing, inputText is ahead of activeFilter: the box
+                    -- shows the keystrokes but the tree must not re-shape
+                    -- until the debounce settles.
+                    FileTree.view
+                        { inputText = "zzz"
+                        , activeFilter = ""
+                        , onFilterChanged = always ()
+                        , onFileSelected = always ()
+                        }
+                        [ { path = "src/App.elm", status = GithubFileModified } ]
+                        |> Query.fromHtml
+                        |> Expect.all
+                            [ Query.has [ Selector.class "tree-file" ]
+                            , Query.hasNot [ Selector.class "file-tree-empty" ]
+                            ]
             ]
         , describe "session restore"
             [ test "a known session restores its user" <|

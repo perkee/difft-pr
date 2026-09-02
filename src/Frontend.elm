@@ -2,6 +2,7 @@ port module Frontend exposing (..)
 
 import Array exposing (Array)
 import Browser
+import Debounce
 import Dict exposing (Dict)
 import Duration
 import Effect.Browser.Dom
@@ -80,7 +81,9 @@ emptyModel key url =
     , selectedPR = Nothing
     , diffs = DiffsNotStarted
     , expandedContexts = Set.empty
+    , fileFilterInput = ""
     , fileFilter = ""
+    , fileFilterDebounce = Debounce.init
     , error = Nothing
     }
 
@@ -128,7 +131,9 @@ init url key =
               , selectedPR = Nothing
               , diffs = DiffsNotStarted
               , expandedContexts = Set.empty
+              , fileFilterInput = ""
               , fileFilter = ""
+              , fileFilterDebounce = Debounce.init
               , error = Nothing
               }
             , Command.batch
@@ -183,6 +188,22 @@ sendToBackendAfterConnect message =
     Effect.Task.perform
         (\() -> DeferredSendToBackend message)
         (Effect.Process.sleep (Duration.milliseconds 500))
+
+
+{-| Applying the file filter on every keystroke would re-shape the tree
+mid-word; instead the input's text is pushed through a debouncer and
+only committed as the active filter once typing has paused.
+-}
+fileFilterDebounceConfig : Debounce.Config FrontendMsg
+fileFilterDebounceConfig =
+    { strategy = Debounce.later (Duration.milliseconds 300)
+    , transform = FileFilterDebounceMsg
+    }
+
+
+commitFileFilter : String -> Command FrontendOnly ToBackend FrontendMsg
+commitFileFilter filterText =
+    Effect.Task.perform FileFilterSettled (Effect.Task.succeed filterText)
 
 
 {-| The DOM id a file's diff card renders under, used by the file tree
@@ -304,7 +325,26 @@ update msg model =
             ( model, Effect.Lamdera.sendToBackend message )
 
         FileFilterChanged filterText ->
+            let
+                ( debounce, debounceCommand ) =
+                    Debounce.push fileFilterDebounceConfig filterText model.fileFilterDebounce
+            in
+            ( { model | fileFilterInput = filterText, fileFilterDebounce = debounce }
+            , debounceCommand
+            )
+
+        FileFilterSettled filterText ->
             ( { model | fileFilter = filterText }, Command.none )
+
+        FileFilterDebounceMsg debounceMsg ->
+            let
+                ( debounce, debounceCommand ) =
+                    Debounce.update fileFilterDebounceConfig
+                        (Debounce.takeLast commitFileFilter)
+                        debounceMsg
+                        model.fileFilterDebounce
+            in
+            ( { model | fileFilterDebounce = debounce }, debounceCommand )
 
         FileTreeFileClicked filename ->
             ( model, scrollToFile filename )
@@ -330,6 +370,7 @@ showRoute model =
                 , selectedPR = Nothing
                 , diffs = DiffsNotStarted
                 , expandedContexts = Set.empty
+                , fileFilterInput = ""
                 , fileFilter = ""
                 , error = Nothing
               }
@@ -354,6 +395,7 @@ showRoute model =
                 , selectedPR = Nothing
                 , diffs = DiffsNotStarted
                 , expandedContexts = Set.empty
+                , fileFilterInput = ""
                 , fileFilter = ""
                 , error = Nothing
               }
@@ -377,6 +419,7 @@ showRoute model =
                 , selectedPR = selectedPR
                 , diffs = FetchingPRFiles
                 , expandedContexts = Set.empty
+                , fileFilterInput = ""
                 , fileFilter = ""
                 , error = Nothing
               }
@@ -394,6 +437,7 @@ showRoute model =
                 , selectedPR = Nothing
                 , diffs = DiffsNotStarted
                 , expandedContexts = Set.empty
+                , fileFilterInput = ""
                 , fileFilter = ""
                 , error = Nothing
               }
@@ -955,7 +999,8 @@ viewPRDetail model =
                 div [ Attr.class "pr-layout" ]
                     [ div [ Attr.class "pr-sidebar" ]
                         [ FileTree.view
-                            { filterText = model.fileFilter
+                            { inputText = model.fileFilterInput
+                            , activeFilter = model.fileFilter
                             , onFilterChanged = FileFilterChanged
                             , onFileSelected = FileTreeFileClicked
                             }

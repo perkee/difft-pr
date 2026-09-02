@@ -1,6 +1,7 @@
 module Types exposing (..)
 
 import Browser
+import Debounce
 import Dict exposing (Dict)
 import Effect.Browser.Navigation
 import Set exposing (Set)
@@ -178,7 +179,9 @@ type alias FrontendModel =
     , selectedPR : Maybe GithubPullRequest
     , diffs : DiffsState
     , expandedContexts : Set String
+    , fileFilterInput : String
     , fileFilter : String
+    , fileFilterDebounce : Debounce.Debounce String
     , error : Maybe String
     }
 
@@ -235,6 +238,8 @@ type FrontendMsg
     | AuthAttemptTimedOut
     | DeferredSendToBackend ToBackend
     | FileFilterChanged String
+    | FileFilterSettled String
+    | FileFilterDebounceMsg Debounce.Msg
     | FileTreeFileClicked String
     | NoOpFrontendMsg
 
