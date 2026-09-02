@@ -998,7 +998,7 @@ viewPRDetail model =
                 text ""
         , case treeFilesOf model.diffs of
             [] ->
-                viewDiffs model.expandedContexts model.diffs
+                viewDiffs model.wrapLines model.expandedContexts model.diffs
 
             treeFiles ->
                 div [ Attr.class "pr-layout" ]
@@ -1018,7 +1018,7 @@ viewPRDetail model =
                             , ( "wrap-lines", model.wrapLines )
                             ]
                         ]
-                        [ viewDiffs model.expandedContexts model.diffs ]
+                        [ viewDiffs model.wrapLines model.expandedContexts model.diffs ]
                     ]
         ]
 
@@ -1064,8 +1064,8 @@ treeFilesOf diffs =
             []
 
 
-viewDiffs : Set.Set String -> DiffsState -> Html FrontendMsg
-viewDiffs expandedSet diffs =
+viewDiffs : Bool -> Set.Set String -> DiffsState -> Html FrontendMsg
+viewDiffs wrapLines expandedSet diffs =
     case diffs of
         DiffsNotStarted ->
             text ""
@@ -1081,11 +1081,11 @@ viewDiffs expandedSet diffs =
 
         DiffsReady fileDiffs ->
             div [ Attr.class "diff-results" ]
-                (List.map (viewFileDiff expandedSet) fileDiffs)
+                (List.map (viewFileDiff wrapLines expandedSet) fileDiffs)
 
 
-viewFileDiff : Set.Set String -> FileDiff -> Html FrontendMsg
-viewFileDiff expandedSet fileDiff =
+viewFileDiff : Bool -> Set.Set String -> FileDiff -> Html FrontendMsg
+viewFileDiff wrapLines expandedSet fileDiff =
     div [ Attr.class "diff-file", Attr.id (fileDomId fileDiff.filename) ]
         [ div [ Attr.class "diff-file-header" ]
             [ span [ Attr.class "diff-filename" ] [ text fileDiff.filename ]
@@ -1105,7 +1105,31 @@ viewFileDiff expandedSet fileDiff =
 
             DiffFailed err ->
                 div [ Attr.class "error" ] [ text ("Failed to diff this file: " ++ err) ]
+        , viewStickyScrollbar wrapLines
         ]
+
+
+{-| The always-visible horizontal scrollbar beneath a file's diff. The
+custom element (elm-pkg-js/sticky-scrollbar.js) wires itself to the
+`.diff-chunks` sibling right above it and stays inert when that sibling
+is something else (a failed diff's error box, an empty body).
+
+The `wrap` attribute exists only as a change signal: wrapping alters the
+diff's scroll width without any DOM mutation inside `.diff-chunks`, so
+the element re-measures in `attributeChangedCallback`.
+-}
+viewStickyScrollbar : Bool -> Html msg
+viewStickyScrollbar wrapLines =
+    node "difft-scrollbar"
+        [ Attr.attribute "wrap"
+            (if wrapLines then
+                "on"
+
+             else
+                "off"
+            )
+        ]
+        []
 
 
 githubFileStatusLabel : GithubFileStatus -> String
@@ -1665,7 +1689,25 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
    cells (not minmax(50%, max-content) tracks: a minmax track only grows
    into free space, of which a scroll container has none, so it would
    stay clamped at the minimum). */
-.diff-chunks { overflow-x: auto; display: grid; grid-template-columns: max-content max-content; container-type: inline-size; }
+.diff-chunks { overflow-x: auto; display: grid; grid-template-columns: max-content max-content; container-type: inline-size; scrollbar-width: none; }
+.diff-chunks::-webkit-scrollbar { display: none; }
+/* The container's own scrollbar (hidden above) would sit at the very
+   bottom of the file's diff — off-screen for tall files. The
+   difft-scrollbar custom element (elm-pkg-js/sticky-scrollbar.js)
+   replaces it: pinned to the viewport bottom while the file is in view,
+   mirroring the container's scroll width via its spacer child and
+   syncing scrollLeft both ways. It shows itself (has-overflow) only when
+   there is something to scroll; wrap mode hides it outright — that rule
+   must stay after has-overflow, since the element's measurements go
+   stale while wrapped. The scrollbar pseudo-element styling doubles as
+   an opt-out of macOS overlay scrollbars, which would auto-hide and
+   leave nothing to grab. */
+difft-scrollbar { display: none; position: sticky; bottom: 0; z-index: 2; overflow-x: auto; background: #161b22; border-top: 1px solid #30363d; scrollbar-color: #484f58 #161b22; }
+difft-scrollbar.has-overflow { display: block; }
+.wrap-lines difft-scrollbar { display: none; }
+difft-scrollbar::-webkit-scrollbar { height: 12px; }
+difft-scrollbar::-webkit-scrollbar-track { background: #161b22; }
+difft-scrollbar::-webkit-scrollbar-thumb { background: #484f58; border-radius: 6px; border: 2px solid #161b22; }
 .chunk-group, .context-lines { grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; }
 .hunk { grid-column: 1 / -1; display: grid; grid-template-columns: subgrid; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px; line-height: 20px; }
 .hunk-side { display: flex; padding: 0 8px; min-width: 50cqw; }
