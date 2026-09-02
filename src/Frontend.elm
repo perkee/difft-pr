@@ -883,11 +883,15 @@ viewDiffBody expandedSet fileDiff result =
         case result.status of
             StatusCreated ->
                 div [ Attr.class "diff-chunks" ]
-                    [ div [ Attr.class "chunk-group" ] (List.map viewHunk (wholeFileAddedHunks fileDiff.rhsContent)) ]
+                    [ div [ Attr.class "chunk-group" ]
+                        (List.map (viewHunk Array.empty Array.empty) (wholeFileAddedHunks fileDiff.rhsContent))
+                    ]
 
             StatusDeleted ->
                 div [ Attr.class "diff-chunks" ]
-                    [ div [ Attr.class "chunk-group" ] (List.map viewHunk (wholeFileRemovedHunks fileDiff.lhsContent)) ]
+                    [ div [ Attr.class "chunk-group" ]
+                        (List.map (viewHunk Array.empty Array.empty) (wholeFileRemovedHunks fileDiff.lhsContent))
+                    ]
 
             StatusChanged ->
                 text ""
@@ -1002,7 +1006,7 @@ viewSection lhsLines rhsLines expandedSet section =
 
         ChunkSection hunks ->
             div [ Attr.class "chunk-group" ]
-                (List.map viewHunk hunks)
+                (List.map (viewHunk lhsLines rhsLines) hunks)
 
 
 viewGapSection : Array String -> Array String -> Set.Set String -> GapInfo -> Html FrontendMsg
@@ -1093,8 +1097,8 @@ viewExpandButton filename gapIndex hiddenCount =
         ]
 
 
-viewHunk : DiffHunk -> Html msg
-viewHunk hunk =
+viewHunk : Array String -> Array String -> DiffHunk -> Html msg
+viewHunk lhsLines rhsLines hunk =
     div [ Attr.class "hunk" ]
         [ div [ Attr.class "hunk-side hunk-lhs" ]
             (case hunk.lhs of
@@ -1102,7 +1106,7 @@ viewHunk hunk =
                     [ span [ Attr.class "line-number" ]
                         [ text (String.fromInt (side.lineNumber + 1)) ]
                     , span [ Attr.class "line-content" ]
-                        (viewChanges "removed" side.changes)
+                        (viewLineWithChanges "removed" (lineAt side.lineNumber lhsLines) side.changes)
                     ]
 
                 Nothing ->
@@ -1116,7 +1120,7 @@ viewHunk hunk =
                     [ span [ Attr.class "line-number" ]
                         [ text (String.fromInt (side.lineNumber + 1)) ]
                     , span [ Attr.class "line-content" ]
-                        (viewChanges "added" side.changes)
+                        (viewLineWithChanges "added" (lineAt side.lineNumber rhsLines) side.changes)
                     ]
 
                 Nothing ->
@@ -1127,15 +1131,42 @@ viewHunk hunk =
         ]
 
 
-viewChanges : String -> List DiffChange -> List (Html msg)
-viewChanges side changes =
-    List.map
-        (\change ->
-            span
-                [ Attr.class ("diff-change diff-change-" ++ side ++ " highlight-" ++ highlightClass change.highlight) ]
-                (renderWithWhitespace change.content)
-        )
-        changes
+lineAt : Int -> Array String -> String
+lineAt lineNumber lines =
+    Array.get lineNumber lines |> Maybe.withDefault ""
+
+
+{-| difftastic's `changes` only lists the spans that actually differ
+within a line (as `start`/`end` column offsets), not the whole line —
+rendering just those, as if they were the entire line's content, is why
+an unchanged line like `Semantic.triggerChevron [ class "tw-ml-auto" ]
+[]` was showing up as literally just "ml". This splices each
+highlighted change back into its correct position within `fullLine`,
+rendering the untouched text on either side as plain content.
+-}
+viewLineWithChanges : String -> String -> List DiffChange -> List (Html msg)
+viewLineWithChanges side fullLine changes =
+    let
+        go : Int -> List DiffChange -> List (Html msg) -> List (Html msg)
+        go pos remaining acc =
+            case remaining of
+                [] ->
+                    acc ++ renderWithWhitespace (String.slice pos (String.length fullLine) fullLine)
+
+                change :: rest ->
+                    let
+                        unchangedBefore =
+                            renderWithWhitespace (String.slice pos change.start fullLine)
+
+                        highlighted =
+                            [ span
+                                [ Attr.class ("diff-change diff-change-" ++ side ++ " highlight-" ++ highlightClass change.highlight) ]
+                                (renderWithWhitespace change.content)
+                            ]
+                    in
+                    go change.end rest (acc ++ unchangedBefore ++ highlighted)
+    in
+    go 0 (List.sortBy .start changes) []
 
 
 highlightClass : Highlight -> String

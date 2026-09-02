@@ -4,8 +4,11 @@ import Backend
 import Dict
 import Expect
 import Frontend
+import Html
 import Json.Decode
 import Test exposing (Test, describe, test)
+import Test.Html.Query as Query
+import Test.Html.Selector as Selector
 import Types exposing (..)
 import Url
 
@@ -236,5 +239,43 @@ suite =
                         |> Backend.resolvedPRFiles
                         |> Expect.equal
                             [ { filename = "new.txt", status = GithubFileAdded, lhsContent = "", rhsContent = "hello" } ]
+            ]
+        , describe "viewLineWithChanges"
+            [ test "renders the unchanged text around a change, not just the changed span" <|
+                \_ ->
+                    -- Reproduces the bug reported against a real PR diff: a line like
+                    -- `Semantic.triggerChevron [ class "tw-ml-auto" ] []` was rendering
+                    -- as literally just "ml", because difftastic's `changes` array only
+                    -- lists the differing span (start/end column offsets), not the whole
+                    -- line — the caller is expected to splice it back into the full line.
+                    let
+                        fullLine =
+                            "            , Semantic.triggerChevron [ class \"tw-ml-auto\" ] []"
+
+                        change =
+                            { start = 50, end = 52, content = "ml", highlight = HighlightNormal }
+                    in
+                    Html.div [] (Frontend.viewLineWithChanges "removed" fullLine [ change ])
+                        |> Query.fromHtml
+                        |> Query.has
+                            [ Selector.text "Semantic.triggerChevron"
+                            , Selector.text "tw-"
+                            , Selector.text "-auto\""
+                            ]
+            , test "the changed span is still wrapped in a highlighted diff-change element" <|
+                \_ ->
+                    let
+                        change =
+                            { start = 7, end = 9, content = "ml", highlight = HighlightNormal }
+                    in
+                    Html.div [] (Frontend.viewLineWithChanges "removed" "before ml after" [ change ])
+                        |> Query.fromHtml
+                        |> Query.find [ Selector.class "diff-change-removed" ]
+                        |> Query.has [ Selector.text "ml" ]
+            , test "a line with no changes renders as plain unhighlighted text" <|
+                \_ ->
+                    Html.div [] (Frontend.viewLineWithChanges "removed" "unchanged line" [])
+                        |> Query.fromHtml
+                        |> Query.hasNot [ Selector.class "diff-change" ]
             ]
         ]
