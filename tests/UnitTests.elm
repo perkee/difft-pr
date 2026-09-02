@@ -87,7 +87,7 @@ suite =
                                     ]
                                 }
                             )
-            , test "decodes a difft result with no chunks (unchanged file)" <|
+            , test "decodes a difft result with an explicit empty chunks array" <|
                 \_ ->
                     let
                         json =
@@ -99,6 +99,21 @@ suite =
                                 { filename = "new.txt"
                                 , language = "Text"
                                 , status = StatusUnchanged
+                                , chunks = []
+                                }
+                            )
+            , test "decodes a difft result with chunks omitted entirely (a created or deleted file)" <|
+                \_ ->
+                    let
+                        json =
+                            """{"path":"new.elm","language":"Elm","status":"created"}"""
+                    in
+                    Json.Decode.decodeString Frontend.difftResultDecoder json
+                        |> Expect.equal
+                            (Ok
+                                { filename = "new.elm"
+                                , language = "Elm"
+                                , status = StatusCreated
                                 , chunks = []
                                 }
                             )

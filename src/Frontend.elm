@@ -424,7 +424,21 @@ difftResultDecoder =
         (Decode.field "path" Decode.string)
         (Decode.field "language" Decode.string)
         (Decode.field "status" diffStatusDecoder)
-        (Decode.field "chunks" (Decode.list (Decode.list diffHunkDecoder)))
+        (optionalListField "chunks" (Decode.list diffHunkDecoder))
+
+
+{-| difftastic's own JSON serializer omits `chunks` (and `aligned_lines`)
+entirely when there are no chunks, rather than emitting `[]` — notably for
+created/deleted files, where it expects the caller to render the whole
+file itself instead of computing hunks. See `viewDiffBody`, which does
+exactly that when `chunks` comes back empty.
+-}
+optionalListField : String -> Decode.Decoder a -> Decode.Decoder (List a)
+optionalListField fieldName itemDecoder =
+    Decode.oneOf
+        [ Decode.field fieldName (Decode.list itemDecoder)
+        , Decode.succeed []
+        ]
 
 
 diffStatusDecoder : Decode.Decoder DiffStatus
@@ -856,26 +870,77 @@ githubFileStatusLabel status =
             "copied"
 
 
+{-| difftastic emits no chunks at all for a created or deleted file (see
+`optionalListField`'s doc comment) — there's nothing to align against on
+the other side, so it leaves rendering the whole file to the caller. This
+builds that rendering by hand, as a single synthetic hunk per line, so it
+goes through the same `viewHunk`/highlighting path as a normal diff
+(same "whole line added"/"whole line removed" look, just for every line).
+-}
 viewDiffBody : Set.Set String -> FileDiff -> DifftResult -> Html FrontendMsg
 viewDiffBody expandedSet fileDiff result =
-    let
-        lhsLines =
-            Array.fromList (String.split "\n" fileDiff.lhsContent)
+    if List.isEmpty result.chunks then
+        case result.status of
+            StatusCreated ->
+                div [ Attr.class "diff-chunks" ]
+                    [ div [ Attr.class "chunk-group" ] (List.map viewHunk (wholeFileAddedHunks fileDiff.rhsContent)) ]
 
-        rhsLines =
-            Array.fromList (String.split "\n" fileDiff.rhsContent)
+            StatusDeleted ->
+                div [ Attr.class "diff-chunks" ]
+                    [ div [ Attr.class "chunk-group" ] (List.map viewHunk (wholeFileRemovedHunks fileDiff.lhsContent)) ]
 
-        ranges =
-            List.map chunkGroupRange result.chunks
+            StatusChanged ->
+                text ""
 
-        totalRhsLines =
-            Array.length rhsLines
+            StatusUnchanged ->
+                text ""
 
-        sections =
-            buildSections fileDiff.filename totalRhsLines result.chunks ranges
-    in
-    div [ Attr.class "diff-chunks" ]
-        (List.map (viewSection lhsLines rhsLines expandedSet) sections)
+    else
+        let
+            lhsLines =
+                Array.fromList (String.split "\n" fileDiff.lhsContent)
+
+            rhsLines =
+                Array.fromList (String.split "\n" fileDiff.rhsContent)
+
+            ranges =
+                List.map chunkGroupRange result.chunks
+
+            totalRhsLines =
+                Array.length rhsLines
+
+            sections =
+                buildSections fileDiff.filename totalRhsLines result.chunks ranges
+        in
+        div [ Attr.class "diff-chunks" ]
+            (List.map (viewSection lhsLines rhsLines expandedSet) sections)
+
+
+wholeFileAddedHunks : String -> List DiffHunk
+wholeFileAddedHunks content =
+    String.split "\n" content
+        |> List.indexedMap
+            (\i line ->
+                { lhs = Nothing
+                , rhs = Just { lineNumber = i, changes = [ wholeLineChange line ] }
+                }
+            )
+
+
+wholeFileRemovedHunks : String -> List DiffHunk
+wholeFileRemovedHunks content =
+    String.split "\n" content
+        |> List.indexedMap
+            (\i line ->
+                { lhs = Just { lineNumber = i, changes = [ wholeLineChange line ] }
+                , rhs = Nothing
+                }
+            )
+
+
+wholeLineChange : String -> DiffChange
+wholeLineChange line =
+    { start = 0, end = String.length line, content = line, highlight = HighlightNormal }
 
 
 type DiffSection
