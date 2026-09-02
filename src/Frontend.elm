@@ -351,8 +351,8 @@ update msg model =
         FileTreeFileClicked filename ->
             ( model, scrollToFile filename )
 
-        ToggleLineWrap ->
-            ( { model | wrapLines = not model.wrapLines }, Command.none )
+        SetLineWrap wrapLines ->
+            ( { model | wrapLines = wrapLines }, Command.none )
 
         NoOpFrontendMsg ->
             ( model, Command.none )
@@ -1003,7 +1003,8 @@ viewPRDetail model =
             treeFiles ->
                 div [ Attr.class "pr-layout" ]
                     [ div [ Attr.class "pr-sidebar" ]
-                        [ FileTree.view
+                        [ viewViewOptions model.wrapLines
+                        , FileTree.view
                             { inputText = model.fileFilterInput
                             , activeFilter = model.fileFilter
                             , onFilterChanged = FileFilterChanged
@@ -1017,29 +1018,26 @@ viewPRDetail model =
                             , ( "wrap-lines", model.wrapLines )
                             ]
                         ]
-                        [ viewDiffToolbar model.wrapLines
-                        , viewDiffs model.expandedContexts model.diffs
-                        ]
+                        [ viewDiffs model.expandedContexts model.diffs ]
                     ]
         ]
 
 
-viewDiffToolbar : Bool -> Html FrontendMsg
-viewDiffToolbar wrapLines =
-    div [ Attr.class "diff-toolbar" ]
-        [ button
-            [ onClick ToggleLineWrap
-            , Attr.class "btn btn-small btn-toggle"
-            , Attr.classList [ ( "btn-toggle-on", wrapLines ) ]
-            , Attr.attribute "aria-pressed"
-                (if wrapLines then
-                    "true"
-
-                 else
-                    "false"
-                )
+{-| The sticky menu strip at the top of the sidebar, home to the view
+toggles (more to come).
+-}
+viewViewOptions : Bool -> Html FrontendMsg
+viewViewOptions wrapLines =
+    div [ Attr.class "view-options" ]
+        [ label [ Attr.class "view-option" ]
+            [ input
+                [ Attr.type_ "checkbox"
+                , Attr.checked wrapLines
+                , Html.Events.onCheck SetLineWrap
+                ]
+                []
+            , text "Wrap lines"
             ]
-            [ text "Wrap lines" ]
         ]
 
 
@@ -1645,8 +1643,11 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .pr-number { color: #8b949e; font-weight: 600; min-width: 48px; }
 .pr-title { color: #c9d1d9; flex: 1; }
 .pr-meta { color: #8b949e; font-size: 12px; }
-.diff-file { border: 1px solid #30363d; border-radius: 6px; margin-bottom: 16px; overflow: hidden; }
-.diff-file-header { display: flex; align-items: center; gap: 8px; padding: 8px 16px; background: #161b22; border-bottom: 1px solid #30363d; font-size: 13px; }
+/* overflow: clip (not hidden) — it still clips to the rounded corners
+   but doesn't create a scroll container, which would break the sticky
+   file header below. */
+.diff-file { border: 1px solid #30363d; border-radius: 6px; margin-bottom: 16px; overflow: clip; }
+.diff-file-header { position: sticky; top: 0; z-index: 3; display: flex; align-items: center; gap: 8px; padding: 8px 16px; background: #161b22; border-bottom: 1px solid #30363d; font-size: 13px; }
 .diff-filename { font-family: 'SF Mono', 'Fira Code', monospace; font-weight: 600; color: #c9d1d9; flex: 1; }
 .diff-language { color: #8b949e; }
 .diff-status { padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; }
@@ -1696,8 +1697,11 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .pr-layout { display: flex; gap: 16px; align-items: flex-start; }
 .pr-sidebar { width: 280px; flex-shrink: 0; position: sticky; top: 8px; max-height: calc(100vh - 16px); overflow-y: auto; }
 .pr-main { flex: 1; min-width: 0; }
-.diff-toolbar { display: flex; justify-content: flex-end; margin-bottom: 8px; }
-.btn-toggle-on { background: #1f6feb33; border-color: #58a6ff; color: #58a6ff; }
+/* The sidebar scrolls its own overflow; the options strip stays pinned
+   at its top while the file tree scrolls underneath. */
+.view-options { position: sticky; top: 0; z-index: 2; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 8px 10px; margin-bottom: 8px; display: flex; flex-direction: column; gap: 6px; }
+.view-option { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #c9d1d9; cursor: pointer; user-select: none; }
+.view-option input[type="checkbox"] { accent-color: #2ea043; margin: 0; cursor: pointer; }
 .file-tree-filter { width: 100%; background: #0d1117; border: 1px solid #30363d; border-radius: 6px; color: #c9d1d9; padding: 6px 8px; margin-bottom: 8px; font-size: 13px; font-family: inherit; }
 .file-tree-filter:focus { outline: none; border-color: #58a6ff; }
 .file-tree-empty { color: #8b949e; font-size: 13px; padding: 8px 6px; }

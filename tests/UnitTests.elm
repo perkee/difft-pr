@@ -454,25 +454,25 @@ suite =
                             , Query.hasNot [ Selector.class "file-tree-empty" ]
                             ]
             ]
-        , describe "viewDiffToolbar"
-            [ test "the wrap toggle reports its off state via aria-pressed" <|
+        , describe "viewViewOptions"
+            [ test "the wrap toggle is a real checkbox, unchecked when wrapping is off" <|
                 \_ ->
-                    Frontend.viewDiffToolbar False
+                    Frontend.viewViewOptions False
                         |> Query.fromHtml
-                        |> Query.find [ Selector.tag "button" ]
                         |> Expect.all
-                            [ Query.has [ Selector.attribute (Attr.attribute "aria-pressed" "false"), Selector.text "Wrap lines" ]
-                            , Query.hasNot [ Selector.class "btn-toggle-on" ]
+                            [ Query.has [ Selector.text "Wrap lines" ]
+                            , Query.find [ Selector.tag "input" ]
+                                >> Query.has
+                                    [ Selector.attribute (Attr.type_ "checkbox")
+                                    , Selector.checked False
+                                    ]
                             ]
-            , test "the wrap toggle reports its on state via aria-pressed and styling" <|
+            , test "the wrap toggle checkbox is checked when wrapping is on" <|
                 \_ ->
-                    Frontend.viewDiffToolbar True
+                    Frontend.viewViewOptions True
                         |> Query.fromHtml
-                        |> Query.find [ Selector.tag "button" ]
-                        |> Query.has
-                            [ Selector.attribute (Attr.attribute "aria-pressed" "true")
-                            , Selector.class "btn-toggle-on"
-                            ]
+                        |> Query.find [ Selector.tag "input" ]
+                        |> Query.has [ Selector.checked True ]
             ]
         , describe "session restore"
             [ test "a known session restores its user" <|

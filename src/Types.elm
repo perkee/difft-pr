@@ -242,7 +242,7 @@ type FrontendMsg
     | FileFilterSettled String
     | FileFilterDebounceMsg Debounce.Msg
     | FileTreeFileClicked String
-    | ToggleLineWrap
+    | SetLineWrap Bool
     | NoOpFrontendMsg
 
 
