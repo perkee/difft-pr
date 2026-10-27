@@ -43,14 +43,11 @@
 - `public/difftastic.wasm` is a ~115MB build output and is **not tracked in
   git** (it exceeds GitHub's 100MB per-file limit). A fresh clone has to
   build it before the app will run — see the next bullet.
-- Rebuilding the wasm artifact: in `../difftastic` (branch
-  `elm-class-list-injection`), `cargo +1.85.0 build --lib --release --target
-  wasm32-wasip1`, then copy `target/wasm32-wasip1/release/difftastic.wasm`
-  here to `public/`. Needs `wasi-libc` (`brew install wasi-libc`) and a
-  non-Apple clang with WASI target support (`brew install llvm`) — see that
-  repo's `Cargo.toml` and `src/wasm_api.rs` for the exported functions and
-  the env vars (`CC_wasm32_wasip1`, `AR_wasm32_wasip1`,
-  `CFLAGS_wasm32_wasip1`) the build needs.
+- Rebuilding the wasm artifact: see the "Building the difftastic wasm"
+  section of `README.md`. It is built from `../difftastic` (branch
+  `elm-class-list-injection`) for `wasm32-wasip1`. Note the recipe there
+  pins `RUSTC` explicitly — a bare `cargo +1.85.0 build` fails on a
+  machine that also has Homebrew's Rust on `PATH`.
 
 ## Custom Types Over Primitives
 - Use custom types (tagged unions) wherever possible
