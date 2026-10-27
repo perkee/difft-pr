@@ -40,6 +40,9 @@
   structural diff, and returns the results via the `diffsComputed` port
 - `public/demo.html` is a standalone (no Elm/Lamdera) page for exercising the
   wasm module directly — useful when debugging the wasm/JS layer in isolation
+- `public/difftastic.wasm` is a ~115MB build output and is **not tracked in
+  git** (it exceeds GitHub's 100MB per-file limit). A fresh clone has to
+  build it before the app will run — see the next bullet.
 - Rebuilding the wasm artifact: in `../difftastic` (branch
   `elm-class-list-injection`), `cargo +1.85.0 build --lib --release --target
   wasm32-wasip1`, then copy `target/wasm32-wasip1/release/difftastic.wasm`
